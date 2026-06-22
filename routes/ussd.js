@@ -19,6 +19,7 @@ const { handleUSSD } = require('../services/ussdFlow');
 router.post('/', async (req, res) => {
   const { sessionId, phoneNumber, networkCode, serviceCode, text } = req.body;
 
+  console.log(req.body);
   // Validate required fields
   if (!sessionId || !phoneNumber) {
     return res.send('END Hitilafu ya mfumo. Jaribu tena.\nSystem error. Please try again.');

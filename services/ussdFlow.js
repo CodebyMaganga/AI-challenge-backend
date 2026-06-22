@@ -24,6 +24,8 @@
 const { getSession, saveSession, deleteSession, getFarmerRecord, saveFarmerRecord } = require('../db/sessionStore');
 const { score, tierMeta } = require('./scorer');
 const { buildSMS, buildUSSDDetail, buildRepaymentLink } = require('./explainer');
+const { writeFarmerNode, getNetworkBonus } = require('../db/neo4j');
+const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
 
 // ── Screen builders ───────────────────────────────────────────────────────────
@@ -189,16 +191,16 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
   const parts = text === '' ? [] : text.split('*');
   const depth = parts.length;
 
-  // ── EXIT anywhere ─────────────────────────────────────────────────────────
-  if (parts[parts.length - 1] === '0' && depth > 1) {
-    await deleteSession(sessionId);
-    return S.goodbye();
-  }
-
-  // ── Main menu ─────────────────────────────────────────────────────────────
+  // Main menu
   if (depth === 0) return S.main();
 
   const mainChoice = parts[0];
+
+  // Exit from top-level only (mainChoice === '0')
+  if (mainChoice === '0') {
+    await deleteSession(sessionId);
+    return S.goodbye();
+  }
 
   // ══ FLOW A: New assessment ════════════════════════════════════════════════
   if (mainChoice === '1') {
@@ -254,8 +256,41 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         gender: GENDER_MAP[parts[7]],
       };
 
-      const { score: scoreFn } = require('./scorer');
-      const result = scoreFn(answers);
+      const { score: scoreFn, scoreWithNetwork } = require('./scorer');
+      const phoneHash = hashPhone(phoneNumber);
+
+      // Base score first (fast — no network call)
+      const baseResult = scoreFn(answers);
+
+      // Write farmer node to Neo4j (async — don't block USSD)
+      writeFarmerNode({
+        phoneHash,
+        tier:      baseResult.tier,
+        crop:      answers.crop,
+        land:      answers.land,
+        gender:    answers.gender,
+        coopName:  answers.coop !== 'none' ? 'Self-reported coop' : null,
+        hadLoan:   answers.loan !== 'no_prior',
+        repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
+      }).catch(err => console.warn('Neo4j write failed:', err.message));
+
+      // Network bonus (async — runs after node is written, may be 0 if new farmer)
+      const networkData = await getNetworkBonus(phoneHash).catch(() => ({ bonus: 0, reason: null }));
+      const networkScore = Math.max(0, Math.min(1000, baseResult.score + networkData.bonus));
+      let networkTier;
+      if (networkScore >= 640) networkTier = 1;
+      else if (networkScore >= 420) networkTier = 2;
+      else if (networkScore >= 220) networkTier = 3;
+      else networkTier = 4;
+
+      const result = {
+        ...baseResult,
+        score:         networkScore,
+        tier:          networkTier,
+        networkBonus:  networkData.bonus,
+        networkReason: networkData.reason,
+        baseScore:     baseResult.score,
+      };
 
       // Save farmer record (internal — lender MIS)
       const existing = await getFarmerRecord(phoneNumber);

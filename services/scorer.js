@@ -151,16 +151,16 @@ function score(answers) {
   const finalScore = Math.max(0, Math.min(1000, Math.round(total)));
 
   let tier;
-  if (finalScore >= 750) tier = 1;
-  else if (finalScore >= 500) tier = 2;
-  else if (finalScore >= 300) tier = 3;
+  if (finalScore >= 640) tier = 1;
+  else if (finalScore >= 420) tier = 2;
+  else if (finalScore >= 220) tier = 3;
   else tier = 4;
 
   // Sort gaps by impact descending — explainer picks the top one
   gaps.sort((a, b) => b.impact - a.impact);
 
   // Compute what score she needs for next tier
-  const tierThresholds = [null, 750, 500, 300, 0];
+  const tierThresholds = [null, 640, 420, 220, 0];
   const nextTierThreshold = tierThresholds[tier - 1]; // threshold above current tier
   const ptsToNextTier = nextTierThreshold ? Math.max(0, nextTierThreshold - finalScore) : 0;
 
@@ -188,4 +188,26 @@ function tierMeta(tier) {
   return meta[tier];
 }
 
-module.exports = { score, tierMeta, GAPS };
+
+
+async function scoreWithNetwork(answers, phoneHash) {
+  const base = score(answers);
+  try {
+    const { getNetworkBonus } = require('../db/neo4j');
+    const network = await getNetworkBonus(phoneHash);
+    if (network.bonus !== 0) {
+      const newScore = Math.max(0, Math.min(1000, base.score + network.bonus));
+      let newTier;
+      if (newScore >= 640) newTier = 1;
+      else if (newScore >= 420) newTier = 2;
+      else if (newScore >= 220) newTier = 3;
+      else newTier = 4;
+      return { ...base, score: newScore, tier: newTier, networkBonus: network.bonus, networkReason: network.reason, baseScore: base.score };
+    }
+  } catch (err) {
+    console.warn('Network scoring skipped:', err.message);
+  }
+  return { ...base, networkBonus: 0, networkReason: null, baseScore: base.score };
+}
+
+module.exports = { score, scoreWithNetwork, tierMeta, GAPS };
