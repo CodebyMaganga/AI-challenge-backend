@@ -1,5 +1,5 @@
 /**
- * ussdFlow.js — USSD session state machine
+ * ussdFlow.js — USSD session state machine (kenyan-street-swa version)
  *
  * Africa's Talking sends the full accumulated input on every keypress.
  * `text` looks like: "" → "1" → "1*2" → "1*2*3" etc.
@@ -7,7 +7,7 @@
  * We split on '*' and route based on depth + first choice.
  *
  * Flow A — New assessment (text starts with "1"):
- *   1 → crop → land → coop → loan → group → mpesa → gender → confirm → score
+ *   1 → crop → (land+coop | herd+milkcoop | combined) → loan → group → mpesa → gender → confirm → score
  *
  * Flow B — View my result (text starts with "2"):
  *   2 → enter PIN → show detail OR set PIN if first time
@@ -22,181 +22,222 @@
  */
 
 const { getSession, saveSession, deleteSession, getFarmerRecord, saveFarmerRecord } = require('../db/sessionStore');
-const { score, tierMeta } = require('./scorer');
+const { score, scoreWithNetwork, tierMeta } = require('./scorer');
 const { buildSMS, buildUSSDDetail, buildRepaymentLink } = require('./explainer');
 const { writeFarmerNode, getNetworkBonus } = require('../db/neo4j');
 const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
 
-// ── Screen builders ───────────────────────────────────────────────────────────
+// ── Screen builders (Kenyan-market Swahili) ─────────────────────────────────
 
 const S = {
   main: () =>
     `CON Karibu FarmCredit 🌱\n` +
     `Welcome to FarmCredit\n\n` +
-    `1. Tathmini mkopo (Credit check)\n` +
-    `2. Angalia matokeo yangu (My result)\n` +
-    `3. Malipo na mkopo (Repayment & credit)\n` +
-    `0. Toka (Exit)`,
+    `1. Pima mkopo wako\n` +
+    `2. Matokeo yangu\n` +
+    `3. Elimu ya malipo\n` +
+    `0. Toka`,
 
   crop: () =>
-    `CON Zao lako kuu ni gani?\n` +
-    `What is your main crop?\n\n` +
-    `1. Mahindi (Maize)\n` +
-    `2. Maharagwe (Beans)\n` +
-    `3. Ng'ombe/Maziwa (Dairy)\n` +
-    `4. Mboga/Matunda (Horticulture)\n` +
-    `5. Mchanganyiko (Mixed)`,
+    `CON Unalima nini hasa?\n\n` +
+    `1. Mahindi\n` +
+    `2. Maharagwe\n` +
+    `3. Ng'ombe/Maziwa\n` +
+    `4. Mboga/Matunda\n` +
+    `5. Mchanganyiko`,
 
   land: () =>
-    `CON Eneo la shamba lako (ekari):\n` +
-    `Size of your farm (acres):\n\n` +
-    `1. Chini ya ekari 1 (Under 1 acre)\n` +
-    `2. Ekari 1 hadi 3 (1–3 acres)\n` +
-    `3. Ekari 3 hadi 10 (3–10 acres)\n` +
-    `4. Zaidi ya ekari 10 (Over 10 acres)`,
+    `CON Shamba lako ni ekari ngapi?\n\n` +
+    `1. Chini ya ekari 1\n` +
+    `2. Ekari 1 hadi 3\n` +
+    `3. Ekari 3 hadi 10\n` +
+    `4. Zaidi ya ekari 10`,
+
+  herd: () =>
+    `CON Una ng'ombe wangapi?\n\n` +
+    `1. 1 – 2\n` +
+    `2. 3 – 5\n` +
+    `3. 6 – 10\n` +
+    `4. Zaidi ya 10`,
+
+  milkCoop: () =>
+    `CON Uko kwenye ushirika wa maziwa?\n\n` +
+    `1. Ndio, miaka 2+ (active)\n` +
+    `2. Ndio, chini ya miaka 2\n` +
+    `3. Ndio, lakini sio active\n` +
+    `4. Hapana`,
+
+  combined: () =>
+    `CON Ukubwa wa shamba na mifugo yako?\n\n` +
+    `1. Shamba ndogo, mifugo 1-2\n` +
+    `2. Shamba wastani, mifugo 3-5\n` +
+    `3. Shamba kubwa, mifugo 6-10\n` +
+    `4. Shamba kubwa sana, mifugo zaidi ya 10`,
 
   coop: () =>
-    `CON Je, uko katika ushirika wa kilimo?\n` +
-    `Are you in a farming cooperative?\n\n` +
-    `1. Ndiyo, amilifu zaidi ya miaka 2\n` +
-    `   (Yes, active 2+ years)\n` +
-    `2. Ndiyo, chini ya miaka 2\n` +
-    `   (Yes, active under 2 years)\n` +
-    `3. Ndiyo, si amilifu (Yes, inactive)\n` +
-    `4. Hapana (No)`,
+    `CON Uko kwenye ushirika wa kilimo?\n\n` +
+    `1. Ndio, miaka 2+ (active)\n` +
+    `2. Ndio, chini ya miaka 2\n` +
+    `3. Ndio, lakini sio active\n` +
+    `4. Hapana`,
 
   loan: () =>
-    `CON Je, umewahi kupata mkopo?\n` +
-    `Have you had a loan before?\n\n` +
-    `1. Ndiyo, nililipa kikamilifu\n` +
-    `   (Yes, fully repaid)\n` +
-    `2. Ndiyo, nililipa sehemu\n` +
-    `   (Yes, partly repaid)\n` +
-    `3. Ndiyo, sikuweza kulipa\n` +
-    `   (Yes, could not repay)\n` +
-    `4. Ndiyo, kulipa kwa chama\n` +
-    `   (Yes, repaid a chama loan)\n` +
-    `5. Hapana, mkopo wa kwanza\n` +
-    `   (No, this is my first)`,
+    `CON Umewahi kupata mkopo?\n\n` +
+    `1. Ndio, nimelipa yote\n` +
+    `2. Ndio, nimelipa sehemu\n` +
+    `3. Ndio, sikulipa\n` +
+    `4. Mkopo wa chama nililipa\n` +
+    `5. Hapana, huu ni wa kwanza`,
 
   group: () =>
-    `CON Je, uko katika chama cha akiba?\n` +
-    `Are you in a savings group (chama)?\n\n` +
-    `1. Ndiyo, ninachangia kila wakati\n` +
-    `   (Yes, I contribute regularly)\n` +
-    `2. Ndiyo, wakati mwingine\n` +
-    `   (Yes, sometimes)\n` +
-    `3. Hapana (No)`,
+    `CON Uko kwenye chama cha akiba?\n\n` +
+    `1. Ndio, nachangia kila wakati\n` +
+    `2. Ndio, wakati mwingine\n` +
+    `3. Hapana`,
 
   mpesa: () =>
-    `CON Unatumia M-Pesa mara ngapi?\n` +
-    `How often do you use M-Pesa?\n\n` +
-    `1. Kila siku (Daily)\n` +
-    `2. Kila wiki (Weekly)\n` +
-    `3. Kila mwezi (Monthly)\n` +
-    `4. Mara chache (Rarely)`,
+    `CON Unatumia M-Pesa aje?\n\n` +
+    `1. Kila siku\n` +
+    `2. Kila wiki\n` +
+    `3. Kila mwezi\n` +
+    `4. Mara chache`,
 
   gender: () =>
-    `CON Swali la mwisho:\n` +
-    `Last question:\n\n` +
-    `1. Mwanamke (Female)\n` +
-    `2. Mwanaume (Male)\n` +
-    `3. Ningependa kutobainisha\n` +
-    `   (Prefer not to say)`,
+    `CON Swali la mwisho: Jinsia?\n\n` +
+    `1. Mwanamke\n` +
+    `2. Mwanaume\n` +
+    `3. Sitaki kusema`,
 
-  confirm: (ans) =>
-    `CON Thibitisha:\n` +
-    `Confirm:\n\n` +
-    `Zao: ${cropLabel(ans.crop)} | Shamba: ${landLabel(ans.land)}\n` +
-    `Ushirika: ${coopLabel(ans.coop)} | Mkopo: ${loanLabel(ans.loan)}\n\n` +
-    `1. Thibitisha na upate matokeo\n` +
-    `   (Confirm & get result)\n` +
-    `2. Anza upya (Start again)\n` +
-    `0. Toka (Exit)`,
+  confirm: (answers) => {
+    const cropLine = `Zao: ${cropLabel(answers.crop)}`;
+    let extraLine = '';
+    if (answers.land) {
+      extraLine = `Shamba: ${landLabel(answers.land)} | Ushirika: ${coopLabel(answers.coop)}`;
+    } else if (answers.herd) {
+      extraLine = `Ng'ombe: ${herdLabel(answers.herd)} | Ushirika wa maziwa: ${coopLabel(answers.milkcoop)}`;
+    } else if (answers.combined) {
+      extraLine = `Shamba na mifugo: ${combinedLabel(answers.combined)}`;
+    }
+    return `CON Hakikisha:\n\n${cropLine} | ${extraLine}\n` +
+      `Mkopo: ${loanLabel(answers.loan)}\n\n` +
+      `1. Hakikisha, pata matokeo\n` +
+      `2. Anza upya\n` +
+      `0. Toka`;
+  },
 
   processing: () =>
-    `END Asante! Tunakusindikia matokeo kwa SMS.\n` +
-    `Thank you! Sending your result by SMS.\n\n` +
-    `Utapata ujumbe wako ndani ya dakika 1.\n` +
-    `You will receive your message within 1 minute.\n\n` +
-    `Piga *384# tena kuona maelezo zaidi.\n` +
-    `Dial *384# again to see full details.`,
+    `END Asante! Tunakutumia matokeo kwa SMS.\n` +
+    `Utapokea ujumbe ndani ya dakika 1.\n\n` +
+    `Piga *384# tena kwa maelezo zaidi.`,
 
   setPIN: () =>
-    `CON Weka nambari yako ya siri ya tarakimu 4\n` +
-    `ili kulinda matokeo yako ya mkopo:\n` +
-    `Set a 4-digit secret PIN to protect\n` +
-    `your credit result:\n\n` +
-    `Ingiza tarakimu 4 (Enter 4 digits):`,
+    `CON Weka PIN yako ya siri (namba 4)\n` +
+    `ili kulinda matokeo yako:\n\n` +
+    `Ingiza namba 4:`,
 
   confirmPIN: () =>
-    `CON Ingiza nambari yako ya siri tena\n` +
-    `ili kuthibitisha:\n` +
-    `Re-enter your PIN to confirm:`,
+    `CON Ingiza PIN tena kuthibitisha:`,
 
   pinMismatch: () =>
-    `CON Nambari hazikuoana. Jaribu tena.\n` +
-    `PINs did not match. Try again.\n\n` +
-    `Ingiza nambari yako ya siri (4 digits):`,
+    `CON PIN hazifanani. Jaribu tena.\n` +
+    `Ingiza namba 4:`,
 
   enterPIN: () =>
-    `CON Ingiza nambari yako ya siri (tarakimu 4)\n` +
-    `kuona maelezo yako:\n` +
-    `Enter your 4-digit PIN to view\n` +
-    `your full result:`,
+    `CON Ingiza PIN yako (namba 4) kuona matokeo:`,
 
   wrongPIN: () =>
-    `CON Nambari si sahihi. Jaribu tena.\n` +
-    `Incorrect PIN. Try again.\n\n` +
-    `Ingiza nambari yako ya siri:`,
+    `CON PIN si sahihi. Jaribu tena.\n` +
+    `Ingiza PIN yako:`,
 
   noResult: () =>
-    `END Hatujapata tathmini yako bado.\n` +
-    `No assessment found yet.\n\n` +
-    `Piga *384# uchague 1 kufanya tathmini yako.\n` +
-    `Dial *384# and choose 1 to get assessed.`,
+    `END Hatuna matokeo yako bado.\n` +
+    `Piga *384# chagua 1 kupima mkopo.`,
 
   invalid: () =>
     `CON Chaguo si sahihi. Jaribu tena.\n` +
-    `Invalid option. Please try again.\n\n` +
-    `0. Rudi (Back to main menu)`,
+    `0. Rudi`,
 
   goodbye: () =>
-    `END Asante. Karibu tena!\n` +
-    `Thank you. Come back anytime!\n` +
-    `FarmCredit 🌱`,
+    `END Asante. Karibu tena!\nFarmCredit 🌱`,
 };
 
-// ── Label helpers (for confirm screen) ───────────────────────────────────────
+// ── Label helpers (confirm screen) ───────────────────────────────────────────
 
-const cropLabel  = c => ({ '1':'Mahindi','2':'Maharagwe','3':'Maziwa','4':'Mboga','5':'Mchanganyiko' }[c] || '?');
-const landLabel  = l => ({ '1':'<1 ekari','2':'1–3 ekari','3':'3–10 ekari','4':'>10 ekari' }[l] || '?');
-const coopLabel  = c => ({ '1':'Amilifu 2+yr','2':'Amilifu <2yr','3':'Si amilifu','4':'Hapana' }[c] || '?');
-const loanLabel  = l => ({ '1':'Nililipa','2':'Sehemu','3':'Sikuweza','4':'Chama','5':'Mkopo wa kwanza' }[l] || '?');
+const cropLabel     = c => ({ '1':'Mahindi','2':'Maharagwe','3':'Maziwa','4':'Mboga','5':'Mchanganyiko' }[c] || '?');
+const landLabel     = l => ({ '1':'<1 ekari','2':'1–3 ekari','3':'3–10 ekari','4':'>10 ekari' }[l] || '?');
+const herdLabel     = h => ({ '1':'1–2','2':'3–5','3':'6–10','4':'>10' }[h] || '?');
+const combinedLabel = m => ({ '1':'Ndogo, mifugo 1-2','2':'Wastani, mifugo 3-5','3':'Kubwa, mifugo 6-10','4':'Kubwa sana, >10' }[m] || '?');
+const coopLabel     = c => ({ '1':'Miaka 2+','2':'<Miaka 2','3':'Sio active','4':'Hapana' }[c] || '?');
+const loanLabel     = l => ({ '1':'Nililipa yote','2':'Nililipa sehemu','3':'Sikulipa','4':'Mkopo wa chama','5':'Mkopo wa kwanza' }[l] || '?');
 
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
 
-const CROP_MAP  = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
-const LAND_MAP  = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
-const COOP_MAP  = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };
-const LOAN_MAP  = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
-const GROUP_MAP = { '1':'active_saving','2':'occasional','3':'none' };
-const MPESA_MAP = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
-const GENDER_MAP= { '1':'female','2':'male','3':'unspecified' };
+const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
+const LAND_MAP     = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
+const HERD_MAP     = { '1':'1-2','2':'3-5','3':'6-10','4':'over10' };
+const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };    // general coop / milk coop
+const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
+const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
+const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
+const GENDER_MAP   = { '1':'female','2':'male','3':'unspecified' };
+const COMBINED_MAP = { '1':'small_farm_few','2':'medium_farm_moderate','3':'large_farm_many','4':'very_large_farm_many' };
 
-// ── Main handler ──────────────────────────────────────────────────────────────
+// ── Question sequences per crop ──────────────────────────────────────────────
+
+const SEQUENCES = {
+  maize:        ['land','coop','loan','group','mpesa','gender'],
+  beans:        ['land','coop','loan','group','mpesa','gender'],
+  horticulture: ['land','coop','loan','group','mpesa','gender'],
+  dairy:        ['herd','milkcoop','loan','group','mpesa','gender'],
+  mixed:        ['combined','loan','group','mpesa','gender'],
+};
+
+// ── Next question screen based on key ────────────────────────────────────────
+
+function screenForKey(key) {
+  const screens = {
+    land:     S.land,
+    coop:     S.coop,
+    herd:     S.herd,
+    milkcoop: S.milkCoop,
+    combined: S.combined,
+    loan:     S.loan,
+    group:    S.group,
+    mpesa:    S.mpesa,
+    gender:   S.gender,
+  };
+  return (screens[key] || S.invalid)();
+}
+
+// ── Map answer value to scorer key ──────────────────────────────────────────
+
+function mapAnswer(key, value) {
+  const maps = {
+    land:     LAND_MAP,
+    coop:     COOP_MAP,
+    herd:     HERD_MAP,
+    milkcoop: COOP_MAP,          // uses same categories as coop
+    combined: COMBINED_MAP,
+    loan:     LOAN_MAP,
+    group:    GROUP_MAP,
+    mpesa:    MPESA_MAP,
+    gender:   GENDER_MAP,
+    crop:     CROP_MAP,
+  };
+  return (maps[key] && maps[key][value]) || value;
+}
+
+// ── Main handler ─────────────────────────────────────────────────────────────
 
 async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
   const parts = text === '' ? [] : text.split('*');
-  const depth = parts.length;
-
-  // Main menu
-  if (depth === 0) return S.main();
-
   const mainChoice = parts[0];
 
-  // Exit from top-level only (mainChoice === '0')
+  // Main menu
+  if (parts.length === 0) return S.main();
+
+  // Exit from top-level only
   if (mainChoice === '0') {
     await deleteSession(sessionId);
     return S.goodbye();
@@ -204,77 +245,74 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
   // ══ FLOW A: New assessment ════════════════════════════════════════════════
   if (mainChoice === '1') {
-    const fd = depth - 1; // flow depth (answers given so far within flow A)
+    // Retrieve or create session for this assessment flow
+    let session = await getSession(sessionId);
+    if (!session || session.state !== 'assess') {
+      // Start a fresh assessment
+      session = { state: 'assess', answers: {} };
+      await saveSession(sessionId, session);
+    }
 
-    if (fd === 0) return S.crop();
-    if (fd === 1) {
-      if (!CROP_MAP[parts[1]]) return S.invalid();
-      return S.land();
-    }
-    if (fd === 2) {
-      if (!LAND_MAP[parts[2]]) return S.invalid();
-      return S.coop();
-    }
-    if (fd === 3) {
-      if (!COOP_MAP[parts[3]]) return S.invalid();
-      return S.loan();
-    }
-    if (fd === 4) {
-      if (!LOAN_MAP[parts[4]]) return S.invalid();
-      return S.group();
-    }
-    if (fd === 5) {
-      if (!GROUP_MAP[parts[5]]) return S.invalid();
-      return S.mpesa();
-    }
-    if (fd === 6) {
-      if (!MPESA_MAP[parts[6]]) return S.invalid();
-      return S.gender();
-    }
-    if (fd === 7) {
-      if (!GENDER_MAP[parts[7]]) return S.invalid();
-      // Build answers object for confirm screen
-      const ans = {
-        crop:   parts[1], land: parts[2], coop: parts[3],
-        loan:   parts[4], group: parts[5], mpesa: parts[6],
-        gender: parts[7],
-      };
-      return S.confirm(ans);
-    }
-    if (fd === 8) {
-      if (parts[8] === '2') return S.main();         // start again
-      if (parts[8] !== '1') return S.invalid();
+    const answers = session.answers;
 
-      // ── Score the farmer ─────────────────────────────────────────────────
-      const answers = {
-        crop:   CROP_MAP[parts[1]],
-        land:   LAND_MAP[parts[2]],
-        coop:   COOP_MAP[parts[3]],
-        loan:   LOAN_MAP[parts[4]],
-        group:  GROUP_MAP[parts[5]],
-        mpesa:  MPESA_MAP[parts[6]],
-        gender: GENDER_MAP[parts[7]],
-      };
+    // ── 1st step: crop question ──────────────────────────────────────────────
+    if (!answers.crop) {
+      if (parts.length < 2) return S.crop();   // waiting for crop answer
+      const cropVal = parts[1];
+      if (!CROP_MAP[cropVal]) return S.invalid();
+      answers.crop = CROP_MAP[cropVal];
+      await saveSession(sessionId, session);
+      // Show the first question of the sequence for this crop
+      const seq = SEQUENCES[answers.crop];
+      return screenForKey(seq[0]);
+    }
 
-      const { score: scoreFn, scoreWithNetwork } = require('./scorer');
+    // ── Collect answers using the crop‑specific sequence ─────────────────────
+    const seq = SEQUENCES[answers.crop];
+    // How many sequence answers have we already stored?
+    const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
+
+    // If all sequence answers are stored, we are in confirm phase
+    if (storedSeqKeys.length === seq.length) {
+      // Expect confirm choice
+      const lastPart = parts[parts.length - 1];
+      if (lastPart === '2') {
+        // Start again
+        await deleteSession(sessionId);
+        return S.main();
+      }
+      if (lastPart === '0') {
+        await deleteSession(sessionId);
+        return S.goodbye();
+      }
+      if (lastPart !== '1') return S.invalid();
+
+      // ── Score the farmer ───────────────────────────────────────────────
+      const scorerInput = { crop: answers.crop };
+      // Copy all stored answers into scorerInput, using mapped values
+      for (const key of seq) {
+        scorerInput[key] = answers[key];
+      }
+      // Add gender (always present)
+      scorerInput.gender = answers.gender;
+
+      const baseResult = score(scorerInput);
       const phoneHash = hashPhone(phoneNumber);
 
-      // Base score first (fast — no network call)
-      const baseResult = scoreFn(answers);
-
-      // Write farmer node to Neo4j (async — don't block USSD)
+      // Write farmer node to Neo4j (fire & forget)
       writeFarmerNode({
         phoneHash,
         tier:      baseResult.tier,
         crop:      answers.crop,
-        land:      answers.land,
+        land:      answers.land || null,
+        herd:      answers.herd || null,
         gender:    answers.gender,
-        coopName:  answers.coop !== 'none' ? 'Self-reported coop' : null,
+        coopName:  answers.coop !== 'none' ? 'Self-reported coop' : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
         hadLoan:   answers.loan !== 'no_prior',
         repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
       }).catch(err => console.warn('Neo4j write failed:', err.message));
 
-      // Network bonus (async — runs after node is written, may be 0 if new farmer)
+      // Network bonus (async)
       const networkData = await getNetworkBonus(phoneHash).catch(() => ({ bonus: 0, reason: null }));
       const networkScore = Math.max(0, Math.min(1000, baseResult.score + networkData.bonus));
       let networkTier;
@@ -292,7 +330,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         baseScore:     baseResult.score,
       };
 
-      // Save farmer record (internal — lender MIS)
+      // Save farmer record
       const existing = await getFarmerRecord(phoneNumber);
       await saveFarmerRecord(phoneNumber, {
         lastScore:        result,
@@ -303,7 +341,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         pin:              existing?.pin    || null,
       });
 
-      // Send SMS asynchronously — don't block USSD response (5s limit)
+      // Send SMS asynchronously
       const smsText = buildSMS(result);
       sendSMS(phoneNumber, smsText).catch(err =>
         console.error('SMS send failed:', err.message)
@@ -312,28 +350,51 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       await deleteSession(sessionId);
       return S.processing();
     }
+
+    // ── Still collecting answers ──────────────────────────────────────────────
+    // The next expected key is the first key not yet stored
+    const nextKey = seq[storedSeqKeys.length];
+    if (parts.length < storedSeqKeys.length + 2) {
+      // Show the question for nextKey (we are waiting for it)
+      return screenForKey(nextKey);
+    }
+
+    // We have a new answer (the last part)
+    const answerValue = parts[parts.length - 1];
+    const map = {
+      land: LAND_MAP, coop: COOP_MAP, herd: HERD_MAP, milkcoop: COOP_MAP,
+      combined: COMBINED_MAP, loan: LOAN_MAP, group: GROUP_MAP,
+      mpesa: MPESA_MAP, gender: GENDER_MAP,
+    };
+    const mapped = map[nextKey] ? map[nextKey][answerValue] : undefined;
+    if (mapped === undefined) return S.invalid();
+    answers[nextKey] = mapped;
+    await saveSession(sessionId, session);
+
+    // After storing, check if we just collected the last sequence key
+    const newStoredLen = seq.filter(k => answers.hasOwnProperty(k)).length;
+    if (newStoredLen === seq.length) {
+      // All sequence answers collected – show confirm screen
+      return S.confirm(answers);
+    }
+    // Otherwise, show the next question
+    return screenForKey(seq[newStoredLen]);
   }
 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════
   if (mainChoice === '2') {
     const farmerRecord = await getFarmerRecord(phoneNumber);
-
     if (!farmerRecord?.lastScore) return S.noResult();
 
-    const fd = depth - 1;
+    const fd = parts.length - 1;
 
     // Sub-flow B1: farmer has no PIN yet → set one first
     if (!farmerRecord.pinSet) {
       if (fd === 0) return S.setPIN();
       if (fd === 1) {
         if (!/^\d{4}$/.test(parts[1])) {
-          return (
-            `CON PIN lazima iwe tarakimu 4.\n` +
-            `PIN must be exactly 4 digits.\n\n` +
-            `Jaribu tena (Try again):`
-          );
+          return `CON PIN lazima iwe namba 4.\nJaribu tena:`;
         }
-        // Store candidate PIN in live session for confirmation
         await saveSession(sessionId, { candidatePIN: parts[1] });
         return S.confirmPIN();
       }
@@ -343,7 +404,6 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
           await deleteSession(sessionId);
           return S.pinMismatch();
         }
-        // Confirm and save PIN
         await saveFarmerRecord(phoneNumber, {
           ...farmerRecord,
           pin:    parts[2],
@@ -351,7 +411,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         });
         await deleteSession(sessionId);
         const detail = buildUSSDDetail(farmerRecord.lastScore);
-        return `CON ${detail}\n\n0. Toka (Exit)`;
+        return `CON ${detail}\n\n0. Toka`;
       }
     }
 
@@ -360,9 +420,8 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     if (fd === 1) {
       if (parts[1] !== farmerRecord.pin) return S.wrongPIN();
       const detail = buildUSSDDetail(farmerRecord.lastScore);
-      // Show repayment connection on next screen
       await saveSession(sessionId, { detailShown: true });
-      return `CON ${detail}\n\n1. Malipo na mkopo\n   (Repayment & credit)\n0. Toka (Exit)`;
+      return `CON ${detail}\n\n1. Elimu ya malipo\n0. Toka`;
     }
     if (fd === 2 && parts[2] === '1') {
       return buildRepaymentLink(farmerRecord.lastTier);

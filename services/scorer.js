@@ -1,23 +1,26 @@
 /**
- * scorer.js
+ * scorer.js — domain‑aware credit score (dairy + mixed support)
  *
  * Converts USSD answers into an internal credit score.
  * Output is NEVER shown directly to the farmer — it feeds the explainer.
  *
  * Design principles:
  *  - No land title or collateral required
- *  - No age or gender penalty (equity-adjusted)
+ *  - No age or gender penalty (equity‑adjusted)
  *  - Female farmers without prior loan history get a baseline boost
  *    to offset historical data bias in training samples
- *  - M-Pesa is pulled asynchronously; base score uses USSD answers only
+ *  - M‑Pesa is pulled asynchronously; base score uses USSD answers only
  *
- * Signals collected via USSD (6 questions):
+ * Signals collected via USSD (varies by crop):
  *   crop        — what she grows (context, not scored)
- *   land        — farm size in acres (proxy for income potential)
- *   coop        — cooperative / savings group membership
+ *   land        — farm size in acres (maize/beans/horticulture)
+ *   coop        — agricultural cooperative (maize/beans/horticulture)
+ *   herd        — number of dairy cows (dairy)
+ *   milkcoop    — milk cooperative membership (dairy)
+ *   combined    — farm size + livestock combined (mixed)
  *   loan        — prior loan repayment behaviour
  *   group       — chama / peer group active saving
- *   mpesa       — M-Pesa usage self-report (enriched later)
+ *   mpesa       — M‑Pesa usage self‑report (enriched later)
  *
  * Tiers (what the farmer sees):
  *   Tier 1 — score 750–1000  — "Kiwango cha Kwanza"  (approved, full limit)
@@ -33,13 +36,19 @@ const W = {
   loan: {
     repaid_full:    300,
     repaid_partial: 100,
-    repaid_chama:   200, // informal chama loan repaid — counts strongly
-    no_prior:         0, // neutral, not negative
+    repaid_chama:   200,
+    no_prior:         0,
     defaulted:      -150,
   },
 
-  // Cooperative / savings group membership
+  // Cooperative / savings group membership (general & milk)
   coop: {
+    active_over2yr:  140,
+    active_under2yr:  80,
+    inactive:         30,
+    none:              0,
+  },
+  milkcoop: {   // same weights, just a separate signal name for clarity
     active_over2yr:  140,
     active_under2yr:  80,
     inactive:         30,
@@ -53,7 +62,7 @@ const W = {
     none:             0,
   },
 
-  // M-Pesa usage consistency (self-reported; overridden by enrichment)
+  // M‑Pesa usage consistency (self‑reported; overridden by enrichment)
   mpesa: {
     daily:          110,
     weekly:          70,
@@ -61,7 +70,7 @@ const W = {
     rarely:           0,
   },
 
-  // Farm size — proxy for income potential, not ownership
+  // Farm size — proxy for income potential (crop farmers)
   land: {
     under1:   20,
     one_three: 50,
@@ -69,10 +78,26 @@ const W = {
     over10:   100,
   },
 
-  // Equity boosts — not penalties, only positive adjustments
+  // Dairy herd size — proxy for milk income
+  herd: {
+    '1-2':   20,
+    '3-5':   50,
+    '6-10':  80,
+    'over10': 100,
+  },
+
+  // Combined farm + livestock (mixed farmers)
+  combined: {
+    small_farm_few:         { land: 'under1',   herd: '1-2'   },
+    medium_farm_moderate:   { land: 'one_three', herd: '3-5'   },
+    large_farm_many:        { land: 'three_ten', herd: '6-10'  },
+    very_large_farm_many:   { land: 'over10',    herd: 'over10' },
+  },
+
+  // Equity boosts — only positive adjustments
   equity: {
-    female_no_prior_loan:  40, // offset historical data bias
-    female_active_group:   20, // chama participation signal upweighted
+    female_no_prior_loan:  40,
+    female_active_group:   20,
   },
 };
 
@@ -86,15 +111,17 @@ const GAPS = {
   NO_GROUP:           'no_group',
   LOW_MPESA:          'low_mpesa',
   SMALL_FARM:         'small_farm',
+  SMALL_HERD:         'small_herd',
+  NO_MILKCOOP:        'no_milkcoop',
 };
 
 // ── Main scoring function ─────────────────────────────────────────────────────
 
 function score(answers) {
-  const { crop, land, coop, loan, group, mpesa, gender } = answers;
+  const { crop, loan, group, mpesa, gender } = answers;
   let total = 0;
-  const breakdown = []; // internal — lender MIS only
-  const gaps      = []; // ordered by impact — feeds explainer
+  const breakdown = [];
+  const gaps = [];
 
   // ── Prior loan ────────────────────────────────────────────────────────────
   const loanPts = W.loan[loan] ?? 0;
@@ -102,38 +129,71 @@ function score(answers) {
   breakdown.push({ signal: 'Prior loan repayment', value: loan, pts: loanPts });
 
   if (loan === 'no_prior')   gaps.push({ gap: GAPS.NO_LOAN_HISTORY, impact: 300 });
-  if (loan === 'defaulted')  gaps.push({ gap: GAPS.DEFAULTED,       impact: 450 }); // 300 recovery + lost pts
+  if (loan === 'defaulted')  gaps.push({ gap: GAPS.DEFAULTED,       impact: 450 });
 
-  // ── Cooperative ───────────────────────────────────────────────────────────
-  const coopPts = W.coop[coop] ?? 0;
-  total += coopPts;
-  breakdown.push({ signal: 'Cooperative membership', value: coop, pts: coopPts });
-
-  if (coop === 'none')     gaps.push({ gap: GAPS.NO_COOP,      impact: 140 });
-  if (coop === 'inactive') gaps.push({ gap: GAPS.INACTIVE_COOP, impact: 110 });
+  // ── Cooperative / Milk cooperative ────────────────────────────────────────
+  if (crop === 'dairy') {
+    // Use milkcoop signal
+    const milkcoopVal = answers.milkcoop || 'none';
+    const coopPts = W.milkcoop[milkcoopVal] ?? 0;
+    total += coopPts;
+    breakdown.push({ signal: 'Milk cooperative membership', value: milkcoopVal, pts: coopPts });
+    if (milkcoopVal === 'none')     gaps.push({ gap: GAPS.NO_MILKCOOP, impact: 140 });
+    if (milkcoopVal === 'inactive') gaps.push({ gap: GAPS.INACTIVE_COOP, impact: 110 });
+  } else if (crop === 'mixed') {
+    // Mixed farmers skip coop (we don't ask) — score as none
+    breakdown.push({ signal: 'Cooperative membership', value: 'none', pts: 0 });
+  } else {
+    // Maize, beans, horticulture — use general coop
+    const coopVal = answers.coop || 'none';
+    const coopPts = W.coop[coopVal] ?? 0;
+    total += coopPts;
+    breakdown.push({ signal: 'Cooperative membership', value: coopVal, pts: coopPts });
+    if (coopVal === 'none')     gaps.push({ gap: GAPS.NO_COOP,      impact: 140 });
+    if (coopVal === 'inactive') gaps.push({ gap: GAPS.INACTIVE_COOP, impact: 110 });
+  }
 
   // ── Chama / peer group ────────────────────────────────────────────────────
   const groupPts = W.group[group] ?? 0;
   total += groupPts;
   breakdown.push({ signal: 'Savings group (chama)', value: group, pts: groupPts });
-
   if (group === 'none') gaps.push({ gap: GAPS.NO_GROUP, impact: 120 });
 
-  // ── M-Pesa ────────────────────────────────────────────────────────────────
+  // ── M‑Pesa ────────────────────────────────────────────────────────────────
   const mpesaPts = W.mpesa[mpesa] ?? 0;
   total += mpesaPts;
   breakdown.push({ signal: 'M-Pesa activity', value: mpesa, pts: mpesaPts });
-
   if (mpesa === 'rarely' || mpesa === 'monthly') {
     gaps.push({ gap: GAPS.LOW_MPESA, impact: 110 });
   }
 
-  // ── Farm size ─────────────────────────────────────────────────────────────
-  const landPts = W.land[land] ?? 20;
-  total += landPts;
-  breakdown.push({ signal: 'Farm size', value: land, pts: landPts });
-
-  if (land === 'under1') gaps.push({ gap: GAPS.SMALL_FARM, impact: 80 });
+  // ── Farm / Herd / Combined signal ─────────────────────────────────────────
+  if (crop === 'dairy') {
+    const herdVal = answers.herd || '1-2';   // default tiny herd if missing
+    const herdPts = W.herd[herdVal] ?? 20;
+    total += herdPts;
+    breakdown.push({ signal: 'Dairy herd size', value: herdVal, pts: herdPts });
+    if (herdVal === '1-2') gaps.push({ gap: GAPS.SMALL_HERD, impact: 80 });
+  } else if (crop === 'mixed') {
+    const combinedVal = answers.combined || 'small_farm_few';
+    const parts = W.combined[combinedVal];
+    if (parts) {
+      const landPts = W.land[parts.land] ?? 20;
+      const herdPts = W.herd[parts.herd] ?? 20;
+      total += landPts + herdPts;
+      breakdown.push({ signal: 'Farm size (from combined)', value: parts.land, pts: landPts });
+      breakdown.push({ signal: 'Livestock (from combined)', value: parts.herd, pts: herdPts });
+      if (parts.land === 'under1') gaps.push({ gap: GAPS.SMALL_FARM, impact: 80 });
+      if (parts.herd === '1-2')   gaps.push({ gap: GAPS.SMALL_HERD, impact: 80 });
+    }
+  } else {
+    // Crop farmers (maize, beans, horticulture)
+    const landVal = answers.land || 'under1';
+    const landPts = W.land[landVal] ?? 20;
+    total += landPts;
+    breakdown.push({ signal: 'Farm size', value: landVal, pts: landPts });
+    if (landVal === 'under1') gaps.push({ gap: GAPS.SMALL_FARM, impact: 80 });
+  }
 
   // ── Equity adjustments (only positive) ───────────────────────────────────
   if (gender === 'female') {
@@ -156,21 +216,19 @@ function score(answers) {
   else if (finalScore >= 220) tier = 3;
   else tier = 4;
 
-  // Sort gaps by impact descending — explainer picks the top one
   gaps.sort((a, b) => b.impact - a.impact);
 
-  // Compute what score she needs for next tier
   const tierThresholds = [null, 640, 420, 220, 0];
-  const nextTierThreshold = tierThresholds[tier - 1]; // threshold above current tier
+  const nextTierThreshold = tierThresholds[tier - 1];
   const ptsToNextTier = nextTierThreshold ? Math.max(0, nextTierThreshold - finalScore) : 0;
 
   return {
     score:    finalScore,
     tier,
-    breakdown,      // lender MIS — never shown to farmer
-    gaps,           // ordered gaps — feeds explainer
+    breakdown,
+    gaps,
     ptsToNextTier,
-    crop,           // context for explainer
+    crop,
     gender,
     scoredAt: new Date(),
   };
@@ -187,8 +245,6 @@ function tierMeta(tier) {
   };
   return meta[tier];
 }
-
-
 
 async function scoreWithNetwork(answers, phoneHash) {
   const base = score(answers);
