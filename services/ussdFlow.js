@@ -48,12 +48,10 @@ const S = {
     `5. Mchanganyiko`,
 
   productionSize: () =>
-  `CON Ukubwa wa uzalishaji wako?\n\n` +
-  `1. Mdogo\n` +
-  `2. Wastani\n` +
-  `3. Mkubwa`,
-
-
+    `CON Ukubwa wa uzalishaji wako?\n\n` +
+    `1. Mdogo (kaya tu)\n` +
+    `2. Wastani (kuuza sehemu)\n` +
+    `3. Mkubwa (biashara)`,
 
   coop: () =>
     `CON Uko kwenye ushirika wa kilimo?\n\n` +
@@ -90,24 +88,18 @@ const S = {
     `3. Sitaki kusema`,
 
   confirm: (answers) => {
-
-return `CON Hakikisha:\n\n` +
-
-`Zao: ${cropLabel(answers.crop)}\n` +
-
-`Uzalishaji: ${answers.productionSize}\n` +
-
-`Ushirika: ${coopLabel(answers.coop)}\n` +
-
-`Mkopo: ${loanLabel(answers.loan)}\n\n` +
-
-`1. Hakikisha, pata matokeo\n` +
-
-`2. Anza upya\n` +
-
-`0. Toka`;
-
-},
+    return `CON Hakikisha:\n\n` +
+      `Zao: ${cropLabel(answers.crop)}\n` +
+      `Uzalishaji: ${productionSizeLabel(answers.productionSize)}\n` +
+      `Ushirika: ${coopLabel(answers.coop)}\n` +
+      `Mkopo: ${loanLabel(answers.loan)}\n` +
+      `Chama: ${groupLabel(answers.group)}\n` +
+      `M-Pesa: ${mpesaLabel(answers.mpesa)}\n` +
+      `Jinsia: ${genderLabel(answers.gender)}\n\n` +
+      `1. Hakikisha, pata matokeo\n` +
+      `2. Anza upya\n` +
+      `0. Toka`;
+  },
 
   processing: () =>
     `END Asante! Tunakutumia matokeo kwa SMS.\n` +
@@ -147,38 +139,102 @@ return `CON Hakikisha:\n\n` +
 
 // ── Label helpers (confirm screen) ───────────────────────────────────────────
 
-const cropLabel = c => ({
-  maize:'Mahindi',
-  beans:'Maharagwe',
-  dairy:'Maziwa',
-  horticulture:'Mboga',
-  mixed:'Mchanganyiko'
+const cropLabel = (c) => ({
+  maize: 'Mahindi',
+  beans: 'Maharagwe',
+  dairy: 'Maziwa',
+  horticulture: 'Mboga',
+  mixed: 'Mchanganyiko'
 }[c] || '?');
 
-const coopLabel = c => ({
- active_over2yr:'Miaka 2+',
- active_under2yr:'<Miaka 2',
- inactive:'Sio active',
- none:'Hapana'
+const productionSizeLabel = (p) => ({
+  small: 'Mdogo',
+  medium: 'Wastani',
+  large: 'Mkubwa'
+}[p] || '?');
+
+const coopLabel = (c) => ({
+  active_over2yr: 'Miaka 2+',
+  active_under2yr: '<Miaka 2',
+  inactive: 'Sio active',
+  none: 'Hapana'
 }[c] || '?');
-const loanLabel     = l => ({ '1':'Nililipa yote','2':'Nililipa sehemu','3':'Sikulipa','4':'Mkopo wa chama','5':'Mkopo wa kwanza' }[l] || '?');
+
+const loanLabel = (l) => ({
+  'repaid_full': 'Nililipa yote',
+  'repaid_partial': 'Nililipa sehemu',
+  'defaulted': 'Sikulipa',
+  'repaid_chama': 'Mkopo wa chama',
+  'no_prior': 'Mkopo wa kwanza'
+}[l] || '?');
+
+const groupLabel = (g) => ({
+  'active_saving': 'Nachangia kila wakati',
+  'occasional': 'Wakati mwingine',
+  'none': 'Hapana'
+}[g] || '?');
+
+const mpesaLabel = (m) => ({
+  'daily': 'Kila siku',
+  'weekly': 'Kila wiki',
+  'monthly': 'Kila mwezi',
+  'rarely': 'Mara chache'
+}[m] || '?');
+
+const genderLabel = (g) => ({
+  'female': 'Mwanamke',
+  'male': 'Mwanaume',
+  'unspecified': 'Sitaki kusema'
+}[g] || '?');
 
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
 
-const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
-
-
-const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };    // general coop / milk coop
-const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
-const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
-const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
-const GENDER_MAP   = { '1':'female','2':'male','3':'unspecified' };
-
+const CROP_MAP = { 
+  '1': 'maize', 
+  '2': 'beans', 
+  '3': 'dairy', 
+  '4': 'horticulture', 
+  '5': 'mixed' 
+};
 
 const PRODUCTION_MAP = {
-  '1':'small',
-  '2':'medium',
-  '3':'large'
+  '1': 'small',
+  '2': 'medium',
+  '3': 'large'
+};
+
+const COOP_MAP = { 
+  '1': 'active_over2yr', 
+  '2': 'active_under2yr', 
+  '3': 'inactive', 
+  '4': 'none' 
+};
+
+const LOAN_MAP = { 
+  '1': 'repaid_full', 
+  '2': 'repaid_partial', 
+  '3': 'defaulted', 
+  '4': 'repaid_chama', 
+  '5': 'no_prior' 
+};
+
+const GROUP_MAP = { 
+  '1': 'active_saving', 
+  '2': 'occasional', 
+  '3': 'none' 
+};
+
+const MPESA_MAP = { 
+  '1': 'daily', 
+  '2': 'weekly', 
+  '3': 'monthly', 
+  '4': 'rarely' 
+};
+
+const GENDER_MAP = { 
+  '1': 'female', 
+  '2': 'male', 
+  '3': 'unspecified' 
 };
 
 // ── Question sequences per crop ──────────────────────────────────────────────
@@ -193,49 +249,40 @@ const SEQUENCES = {
     'gender'
   ]
 };
+
 // ── Next question screen based on key ────────────────────────────────────────
 
 function screenForKey(key) {
-
   const screens = {
-
     productionSize: S.productionSize,
-
     coop: S.coop,
-
     loan: S.loan,
-
     group: S.group,
-
     mpesa: S.mpesa,
-
     gender: S.gender
-
   };
-
-  return (screens[key] || S.invalid)();
-
+  
+  return screens[key] ? screens[key]() : S.invalid();
 }
 
 // ── Map answer value to scorer key ──────────────────────────────────────────
 
 function mapAnswer(key, value) {
   const maps = {
-
-  productionSize: PRODUCTION_MAP,
-
-  coop: COOP_MAP,
-
-  loan: LOAN_MAP,
-
-  group: GROUP_MAP,
-
-  mpesa: MPESA_MAP,
-
-  gender: GENDER_MAP
-
-};
-  return maps[key]?.[value];
+    productionSize: PRODUCTION_MAP,
+    coop: COOP_MAP,
+    loan: LOAN_MAP,
+    group: GROUP_MAP,
+    mpesa: MPESA_MAP,
+    gender: GENDER_MAP
+  };
+  
+  if (!maps[key]) return undefined;
+  const mapped = maps[key][value];
+  
+  // Log for debugging
+  console.log(`Mapping ${key} with value ${value} -> ${mapped}`);
+  return mapped;
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
@@ -274,35 +321,49 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       await saveSession(sessionId, session);
       // Show the first question of the sequence for this crop
       const seq = SEQUENCES.default;
-      return screenForKey(seq[0]);
+      const firstQuestion = seq[0]; // 'productionSize'
+      return screenForKey(firstQuestion);
     }
 
     // ── Collect answers using the crop‑specific sequence ─────────────────────
     const seq = SEQUENCES.default;
-    // How many sequence answers have we already stored?
-    const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
+    
+    // Count how many sequence answers we have stored
+    let storedSeqKeys = [];
+    for (let key of seq) {
+      if (answers.hasOwnProperty(key)) {
+        storedSeqKeys.push(key);
+      }
+    }
 
     // If all sequence answers are stored, we are in confirm phase
     if (storedSeqKeys.length === seq.length) {
       // Expect confirm choice
       const lastPart = parts[parts.length - 1];
+      
       if (lastPart === '2') {
         // Start again
         await deleteSession(sessionId);
         return S.main();
       }
+      
       if (lastPart === '0') {
         await deleteSession(sessionId);
         return S.goodbye();
       }
-      if (lastPart !== '1') return S.invalid();
+      
+      if (lastPart !== '1') {
+        return S.invalid();
+      }
 
       // ── Score the farmer ───────────────────────────────────────────────
       const scorerInput = { crop: answers.crop };
+      
       // Copy all stored answers into scorerInput, using mapped values
       for (const key of seq) {
         scorerInput[key] = answers[key];
       }
+      
       // Add gender (always present)
       scorerInput.gender = answers.gender;
 
@@ -312,16 +373,13 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       // Write farmer node to Neo4j (fire & forget)
       writeFarmerNode({
         phoneHash,
-        tier:      baseResult.tier,
-        crop:      answers.crop,
+        tier: baseResult.tier,
+        crop: answers.crop,
         productionSize: answers.productionSize,
-        gender:    answers.gender,
-        coopName:
-          answers.coop !== 'none'
-          ? 'Self-reported coop'
-          : null,
-        hadLoan:   answers.loan !== 'no_prior',
-        repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
+        gender: answers.gender,
+        coopName: answers.coop !== 'none' ? 'Self-reported coop' : null,
+        hadLoan: answers.loan !== 'no_prior',
+        repaid: answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
       }).catch(err => console.warn('Neo4j write failed:', err.message));
 
       // Network bonus (async)
@@ -335,22 +393,22 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
       const result = {
         ...baseResult,
-        score:         networkScore,
-        tier:          networkTier,
-        networkBonus:  networkData.bonus,
+        score: networkScore,
+        tier: networkTier,
+        networkBonus: networkData.bonus,
         networkReason: networkData.reason,
-        baseScore:     baseResult.score,
+        baseScore: baseResult.score,
       };
 
       // Save farmer record
       const existing = await getFarmerRecord(phoneNumber);
       await saveFarmerRecord(phoneNumber, {
-        lastScore:        result,
-        lastTier:         result.tier,
-        lastScoredAt:     result.scoredAt,
-        assessmentCount:  (existing?.assessmentCount || 0) + 1,
-        pinSet:           existing?.pinSet || false,
-        pin:              existing?.pin    || null,
+        lastScore: result,
+        lastTier: result.tier,
+        lastScoredAt: result.scoredAt,
+        assessmentCount: (existing?.assessmentCount || 0) + 1,
+        pinSet: existing?.pinSet || false,
+        pin: existing?.pin || null,
       });
 
       // Send SMS asynchronously
@@ -364,36 +422,51 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     }
 
     // ── Still collecting answers ──────────────────────────────────────────────
-    // The next expected key is the first key not yet stored
-    const nextKey = seq[storedSeqKeys.length];
-    if (parts.length < storedSeqKeys.length + 2) {
+    // Find the next expected key (first key not yet stored)
+    let nextKey = null;
+    for (let key of seq) {
+      if (!answers.hasOwnProperty(key)) {
+        nextKey = key;
+        break;
+      }
+    }
+
+    if (!nextKey) {
+      // Should not happen, but just in case
+      return S.confirm(answers);
+    }
+
+    // Check if we have the answer for the next question in the input
+    // The position of the answer in parts array: storedSeqKeys.length + 2
+    const expectedPartIndex = storedSeqKeys.length + 2;
+    
+    if (parts.length < expectedPartIndex) {
       // Show the question for nextKey (we are waiting for it)
       return screenForKey(nextKey);
     }
 
     // We have a new answer (the last part)
     const answerValue = parts[parts.length - 1];
-    const map = {
-  productionSize: PRODUCTION_MAP,
-  coop: COOP_MAP,
-  loan: LOAN_MAP,
-  group: GROUP_MAP,
-  mpesa: MPESA_MAP,
-  gender: GENDER_MAP,
-};
-  const mapped = mapAnswer(nextKey, answerValue);
-    if (mapped === undefined) return S.invalid();
+    const mapped = mapAnswer(nextKey, answerValue);
+    
+    if (mapped === undefined) {
+      return S.invalid();
+    }
+    
     answers[nextKey] = mapped;
     await saveSession(sessionId, session);
 
     // After storing, check if we just collected the last sequence key
     const newStoredLen = seq.filter(k => answers.hasOwnProperty(k)).length;
+    
     if (newStoredLen === seq.length) {
       // All sequence answers collected – show confirm screen
       return S.confirm(answers);
     }
+    
     // Otherwise, show the next question
-    return screenForKey(seq[newStoredLen]);
+    const nextQuestionKey = seq[newStoredLen];
+    return screenForKey(nextQuestionKey);
   }
 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════
@@ -421,7 +494,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         }
         await saveFarmerRecord(phoneNumber, {
           ...farmerRecord,
-          pin:    parts[2],
+          pin: parts[2],
           pinSet: true,
         });
         await deleteSession(sessionId);
@@ -440,6 +513,12 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     }
     if (fd === 2 && parts[2] === '1') {
       return buildRepaymentLink(farmerRecord.lastTier);
+    }
+    
+    // Handle other options in detail view
+    if (fd === 2 && parts[2] === '0') {
+      await deleteSession(sessionId);
+      return S.goodbye();
     }
   }
 
