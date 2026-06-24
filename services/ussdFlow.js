@@ -7,7 +7,7 @@
  * We split on '*' and route based on depth + first choice.
  *
  * Flow A — New assessment (text starts with "1"):
- *   1 → crop → (land+coop | herd+milkcoop | combined) → loan → group → mpesa → gender → confirm → score
+ *   1 → crop → productionSize → coop → loan → group → mpesa → gender → confirm → score
  *
  * Flow B — View my result (text starts with "2"):
  *   2 → enter PIN → show detail OR set PIN if first time
@@ -47,33 +47,13 @@ const S = {
     `4. Mboga/Matunda\n` +
     `5. Mchanganyiko`,
 
-  land: () =>
-    `CON Shamba lako ni ekari ngapi?\n\n` +
-    `1. Chini ya ekari 1\n` +
-    `2. Ekari 1 hadi 3\n` +
-    `3. Ekari 3 hadi 10\n` +
-    `4. Zaidi ya ekari 10`,
+  productionSize: () =>
+  `CON Ukubwa wa uzalishaji wako?\n\n` +
+  `1. Mdogo\n` +
+  `2. Wastani\n` +
+  `3. Mkubwa`,
 
-  herd: () =>
-    `CON Una ng'ombe wangapi?\n\n` +
-    `1. 1 – 2\n` +
-    `2. 3 – 5\n` +
-    `3. 6 – 10\n` +
-    `4. Zaidi ya 10`,
 
-  milkCoop: () =>
-    `CON Uko kwenye ushirika wa maziwa?\n\n` +
-    `1. Ndio, miaka 2+ (active)\n` +
-    `2. Ndio, chini ya miaka 2\n` +
-    `3. Ndio, lakini sio active\n` +
-    `4. Hapana`,
-
-  combined: () =>
-    `CON Ukubwa wa shamba na mifugo yako?\n\n` +
-    `1. Shamba ndogo, mifugo 1-2\n` +
-    `2. Shamba wastani, mifugo 3-5\n` +
-    `3. Shamba kubwa, mifugo 6-10\n` +
-    `4. Shamba kubwa sana, mifugo zaidi ya 10`,
 
   coop: () =>
     `CON Uko kwenye ushirika wa kilimo?\n\n` +
@@ -110,21 +90,24 @@ const S = {
     `3. Sitaki kusema`,
 
   confirm: (answers) => {
-    const cropLine = `Zao: ${cropLabel(answers.crop)}`;
-    let extraLine = '';
-    if (answers.land) {
-      extraLine = `Shamba: ${landLabel(answers.land)} | Ushirika: ${coopLabel(answers.coop)}`;
-    } else if (answers.herd) {
-      extraLine = `Ng'ombe: ${herdLabel(answers.herd)} | Ushirika wa maziwa: ${coopLabel(answers.milkcoop)}`;
-    } else if (answers.combined) {
-      extraLine = `Shamba na mifugo: ${combinedLabel(answers.combined)}`;
-    }
-    return `CON Hakikisha:\n\n${cropLine} | ${extraLine}\n` +
-      `Mkopo: ${loanLabel(answers.loan)}\n\n` +
-      `1. Hakikisha, pata matokeo\n` +
-      `2. Anza upya\n` +
-      `0. Toka`;
-  },
+
+return `CON Hakikisha:\n\n` +
+
+`Zao: ${cropLabel(answers.crop)}\n` +
+
+`Uzalishaji: ${answers.productionSize}\n` +
+
+`Ushirika: ${coopLabel(answers.coop)}\n` +
+
+`Mkopo: ${loanLabel(answers.loan)}\n\n` +
+
+`1. Hakikisha, pata matokeo\n` +
+
+`2. Anza upya\n` +
+
+`0. Toka`;
+
+},
 
   processing: () =>
     `END Asante! Tunakutumia matokeo kwa SMS.\n` +
@@ -164,67 +147,89 @@ const S = {
 
 // ── Label helpers (confirm screen) ───────────────────────────────────────────
 
-const cropLabel     = c => ({ '1':'Mahindi','2':'Maharagwe','3':'Maziwa','4':'Mboga','5':'Mchanganyiko' }[c] || '?');
-const landLabel     = l => ({ '1':'<1 ekari','2':'1–3 ekari','3':'3–10 ekari','4':'>10 ekari' }[l] || '?');
-const herdLabel     = h => ({ '1':'1–2','2':'3–5','3':'6–10','4':'>10' }[h] || '?');
-const combinedLabel = m => ({ '1':'Ndogo, mifugo 1-2','2':'Wastani, mifugo 3-5','3':'Kubwa, mifugo 6-10','4':'Kubwa sana, >10' }[m] || '?');
+const cropLabel = c => ({
+  maize:'Mahindi',
+  beans:'Maharagwe',
+  dairy:'Maziwa',
+  horticulture:'Mboga',
+  mixed:'Mchanganyiko'
+}[c] || '?');
+
 const coopLabel     = c => ({ '1':'Miaka 2+','2':'<Miaka 2','3':'Sio active','4':'Hapana' }[c] || '?');
 const loanLabel     = l => ({ '1':'Nililipa yote','2':'Nililipa sehemu','3':'Sikulipa','4':'Mkopo wa chama','5':'Mkopo wa kwanza' }[l] || '?');
 
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
 
 const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
-const LAND_MAP     = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
-const HERD_MAP     = { '1':'1-2','2':'3-5','3':'6-10','4':'over10' };
+
+
 const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };    // general coop / milk coop
 const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
 const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
 const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
 const GENDER_MAP   = { '1':'female','2':'male','3':'unspecified' };
-const COMBINED_MAP = { '1':'small_farm_few','2':'medium_farm_moderate','3':'large_farm_many','4':'very_large_farm_many' };
+
+
+const PRODUCTION_MAP = {
+  '1':'small',
+  '2':'medium',
+  '3':'large'
+};
 
 // ── Question sequences per crop ──────────────────────────────────────────────
 
 const SEQUENCES = {
-  maize:        ['land','coop','loan','group','mpesa','gender'],
-  beans:        ['land','coop','loan','group','mpesa','gender'],
-  horticulture: ['land','coop','loan','group','mpesa','gender'],
-  dairy:        ['herd','milkcoop','loan','group','mpesa','gender'],
-  mixed:        ['combined','loan','group','mpesa','gender'],
+  default: [
+    'productionSize',
+    'coop',
+    'loan',
+    'group',
+    'mpesa',
+    'gender'
+  ]
 };
-
 // ── Next question screen based on key ────────────────────────────────────────
 
 function screenForKey(key) {
+
   const screens = {
-    land:     S.land,
-    coop:     S.coop,
-    herd:     S.herd,
-    milkcoop: S.milkCoop,
-    combined: S.combined,
-    loan:     S.loan,
-    group:    S.group,
-    mpesa:    S.mpesa,
-    gender:   S.gender,
+
+    productionSize: S.productionSize,
+
+    coop: S.coop,
+
+    loan: S.loan,
+
+    group: S.group,
+
+    mpesa: S.mpesa,
+
+    gender: S.gender
+
   };
+
   return (screens[key] || S.invalid)();
+
 }
 
 // ── Map answer value to scorer key ──────────────────────────────────────────
 
 function mapAnswer(key, value) {
   const maps = {
-    land:     LAND_MAP,
-    coop:     COOP_MAP,
-    herd:     HERD_MAP,
-    milkcoop: COOP_MAP,          // uses same categories as coop
-    combined: COMBINED_MAP,
-    loan:     LOAN_MAP,
-    group:    GROUP_MAP,
-    mpesa:    MPESA_MAP,
-    gender:   GENDER_MAP,
-    crop:     CROP_MAP,
-  };
+
+  productionSize: PRODUCTION_MAP,
+
+  coop: COOP_MAP,
+
+  loan: LOAN_MAP,
+
+  group: GROUP_MAP,
+
+  mpesa: MPESA_MAP,
+
+  gender: GENDER_MAP
+
+};
   return (maps[key] && maps[key][value]) || value;
 }
 
@@ -263,12 +268,12 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       answers.crop = CROP_MAP[cropVal];
       await saveSession(sessionId, session);
       // Show the first question of the sequence for this crop
-      const seq = SEQUENCES[answers.crop];
+      const seq = SEQUENCES.default;
       return screenForKey(seq[0]);
     }
 
     // ── Collect answers using the crop‑specific sequence ─────────────────────
-    const seq = SEQUENCES[answers.crop];
+    const seq = SEQUENCES.default;
     // How many sequence answers have we already stored?
     const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
 
@@ -304,10 +309,12 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         phoneHash,
         tier:      baseResult.tier,
         crop:      answers.crop,
-        land:      answers.land || null,
-        herd:      answers.herd || null,
+        productionSize: answers.productionSize,
         gender:    answers.gender,
-        coopName:  answers.coop !== 'none' ? 'Self-reported coop' : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
+        coopName:
+          answers.coop !== 'none'
+          ? 'Self-reported coop'
+          : null,
         hadLoan:   answers.loan !== 'no_prior',
         repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
       }).catch(err => console.warn('Neo4j write failed:', err.message));
@@ -362,11 +369,14 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     // We have a new answer (the last part)
     const answerValue = parts[parts.length - 1];
     const map = {
-      land: LAND_MAP, coop: COOP_MAP, herd: HERD_MAP, milkcoop: COOP_MAP,
-      combined: COMBINED_MAP, loan: LOAN_MAP, group: GROUP_MAP,
-      mpesa: MPESA_MAP, gender: GENDER_MAP,
-    };
-    const mapped = map[nextKey] ? map[nextKey][answerValue] : undefined;
+  productionSize: PRODUCTION_MAP,
+  coop: COOP_MAP,
+  loan: LOAN_MAP,
+  group: GROUP_MAP,
+  mpesa: MPESA_MAP,
+  gender: GENDER_MAP,
+};
+    const mapped = mapAnswer(nextKey, answerValue);
     if (mapped === undefined) return S.invalid();
     answers[nextKey] = mapped;
     await saveSession(sessionId, session);
