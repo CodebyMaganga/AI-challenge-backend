@@ -438,7 +438,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
     // Check if we have the answer for the next question in the input
     // The position of the answer in parts array: storedSeqKeys.length + 2
-    const expectedPartIndex = storedSeqKeys.length + 2;
+    const expectedPartIndex = storedSeqKeys.length + 3;
     
     if (parts.length < expectedPartIndex) {
       // Show the question for nextKey (we are waiting for it)
@@ -465,8 +465,9 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     }
     
     // Otherwise, show the next question
-    const nextQuestionKey = seq[newStoredLen];
-    return screenForKey(nextQuestionKey);
+    const nextQuestionKey = seq.find(k => !answers.hasOwnProperty(k));
+
+return screenForKey(nextQuestionKey);
   }
 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════
