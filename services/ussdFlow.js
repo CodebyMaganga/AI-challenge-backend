@@ -155,7 +155,12 @@ const cropLabel = c => ({
   mixed:'Mchanganyiko'
 }[c] || '?');
 
-const coopLabel     = c => ({ '1':'Miaka 2+','2':'<Miaka 2','3':'Sio active','4':'Hapana' }[c] || '?');
+const coopLabel = c => ({
+ active_over2yr:'Miaka 2+',
+ active_under2yr:'<Miaka 2',
+ inactive:'Sio active',
+ none:'Hapana'
+}[c] || '?');
 const loanLabel     = l => ({ '1':'Nililipa yote','2':'Nililipa sehemu','3':'Sikulipa','4':'Mkopo wa chama','5':'Mkopo wa kwanza' }[l] || '?');
 
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
@@ -230,7 +235,7 @@ function mapAnswer(key, value) {
   gender: GENDER_MAP
 
 };
-  return (maps[key] && maps[key][value]) || value;
+  return maps[key]?.[value];
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
@@ -376,7 +381,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
   mpesa: MPESA_MAP,
   gender: GENDER_MAP,
 };
-    const mapped = mapAnswer(nextKey, answerValue);
+  const mapped = mapAnswer(nextKey, answerValue);
     if (mapped === undefined) return S.invalid();
     answers[nextKey] = mapped;
     await saveSession(sessionId, session);
