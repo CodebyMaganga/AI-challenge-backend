@@ -6,6 +6,7 @@
  * Tier mapping: 1 = Gold, 2 = Silver, 3 = Bronze, 4 = Decline
  */
 
+const { GAPS } = require('./gapConstants');
 /**
  * Compute the raw credit score from all available features (no gender).
  */
@@ -121,4 +122,44 @@ function determineTopReason(baseScore, factors) {
   return reasons[0].key;
 }
 
-module.exports = { computeBaseScore, scoreToTier, determineTopReason };
+function detectGaps({ cashflow, weather, graph, farmSize, pastLoan, cropType }) {
+  const gaps = [];
+
+  // Past loan signals
+  if (pastLoan === 'no_prior') gaps.push(GAPS.NO_LOAN_HISTORY);
+  if (pastLoan === 'defaulted') gaps.push(GAPS.DEFAULTED);
+
+  // Farm size
+  if (farmSize === '<0.5' || farmSize === '0.5-2') gaps.push(GAPS.SMALL_FARM);
+
+  // M‑Pesa
+  if (cashflow && cashflow.score < 30) gaps.push(GAPS.LOW_MPESA);
+
+  // Cooperative (no data yet from USSD, but you can keep the old coop question if needed)
+  // For now, we can assume no coop data → skip, or you can add it back to the flow.
+  // If you still collect coop info, include:
+  // if (coop === 'none') gaps.push(GAPS.NO_COOP);
+  // if (coop === 'inactive') gaps.push(GAPS.INACTIVE_COOP);
+
+  // Group savings (also not currently collected)
+  // if (group === 'none') gaps.push(GAPS.NO_GROUP);
+
+  // Weather risk can be a factor, but it's not a "gap" the farmer can fix,
+  // so we don't include it in the actionable list.
+
+  // Sort by impact (you can weight them or just use this rough order)
+  const priority = {
+    [GAPS.DEFAULTED]: 1,
+    [GAPS.NO_LOAN_HISTORY]: 2,
+    [GAPS.LOW_MPESA]: 3,
+    [GAPS.SMALL_FARM]: 4,
+    [GAPS.NO_COOP]: 5,
+    [GAPS.INACTIVE_COOP]: 6,
+    [GAPS.NO_GROUP]: 7,
+  };
+  gaps.sort((a, b) => (priority[a] || 99) - (priority[b] || 99));
+
+  return gaps.slice(0, 2).map(gap => ({ gap })); // top two gaps
+}
+
+module.exports = { detectGaps,computeBaseScore, scoreToTier, determineTopReason };

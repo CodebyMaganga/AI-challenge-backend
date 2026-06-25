@@ -2,7 +2,7 @@
 const mpesaService = require('./mpesaService');
 const weatherService = require('./weatherService');
 const neo4jService = require('./neo4jService');
-const { computeBaseScore, scoreToTier, determineTopReason } = require('./scoreHelpers');
+const { detectGaps, computeBaseScore, scoreToTier, determineTopReason } = require('./scoreHelpers');
 const { writeFarmerNode } = require('../db/neo4j');
 
 async function initiateRiskAssessment(appData, phoneHash) {
@@ -24,9 +24,19 @@ async function initiateRiskAssessment(appData, phoneHash) {
   const weatherRisk = await weatherService.getWeatherRisk (location, cropSeason);
 
   // 3. Neo4j graph risk (with fallback — see below)
-  let graphRisk = null;
+ let graphRisk;
+  let enrichedEvidence = { found: false };   // default
   try {
     graphRisk = await neo4jService.getNetworkRisk(phoneHash, location);
+    // Build evidence from graph data
+    if (graphRisk && graphRisk.connectedPeers > 0) {
+      enrichedEvidence.found = true;
+      enrichedEvidence.goodNeighbors = graphRisk.connectedPeers;
+      if (graphRisk.avgRepayRatio) {
+        enrichedEvidence.coopRepayRate = Math.round(graphRisk.avgRepayRatio * 100);
+      }
+      // enrichedEvidence.coopName = '...'; // if available from graph
+    }
   } catch (err) {
     console.warn('Neo4j query failed, using neutral graph risk:', err.message);
     graphRisk = {
@@ -36,7 +46,10 @@ async function initiateRiskAssessment(appData, phoneHash) {
       connectedPeers: 0,
       avgRepayRatio: 0,
     };
+    enrichedEvidence = { found: false };
   }
+
+
 
   // 4. Base score
   const baseScore = computeBaseScore({
@@ -63,6 +76,21 @@ async function initiateRiskAssessment(appData, phoneHash) {
     pastLoan,
   });
 
+  // Detect actionable gaps
+  const gaps = detectGaps({
+    cashflow: mpesaFeatures,
+    weather: weatherRisk,
+    graph: graphRisk,
+    farmSize,
+    pastLoan,
+  });
+
+   // Points to next tier (approx)
+  const tierThresholds = [75, 60, 45, 0]; // for tier 1,2,3,4
+  const currentThreshold = tierThresholds[tier - 1] || 0;
+  const ptsToNextTier = Math.max(0, currentThreshold - adjustedScore);
+
+
   // 7. Evidence
   const evidenceProfile = {
     baseScore,
@@ -87,8 +115,9 @@ async function initiateRiskAssessment(appData, phoneHash) {
 
   return {
     tier,
-    score: adjustedScore,
-    evidenceProfile,
+    gaps,
+    ptsToNextTier,
+    evidenceProfile: enrichedEvidence,
     scoredAt: new Date().toISOString(),
   };
 }
