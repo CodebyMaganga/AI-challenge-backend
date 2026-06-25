@@ -35,25 +35,26 @@ const sessionSchema = new mongoose.Schema(
     _id:     { type: String }, // sessionId OR 'farmer:<phoneHash>'
 
     // Live session fields
-    phone:       String,       // raw phone, only in live session (short TTL)
+    state:       String,       // 'assess' while farmer is mid-flow
+    phone:       String,
     networkCode: String,
-    answers:     { type: Object, default: {} }, // { crop, land, coop, loan, group, mpesa }
+    answers:     { type: Object, default: {} },
     step:        { type: Number, default: 0 },
 
     // Farmer record fields (persisted after scoring)
     phoneHash:   String,
-    pin:         String,       // 4-digit PIN (plaintext for prototype; hash in prod)
+    pin:         String,
     pinSet:      { type: Boolean, default: false },
-    lastScore:   Object,       // internal — lender MIS only
-    lastTier:    Number,       // 1–4
+    lastScore:   Object,
+    lastTier:    Number,
     lastScoredAt: Date,
     assessmentCount: { type: Number, default: 0 },
+    lastEvidence: Object,
 
     // TTL — live sessions expire after 10 minutes automatically
-    // Farmer records have no TTL (expireAfterSeconds not set on that index)
     expiresAt: Date,
   },
-  { _id: false } // we manage _id ourselves
+  { _id: false }
 );
 
 // Sparse TTL index — only documents WITH expiresAt will be auto-deleted
@@ -64,17 +65,41 @@ const Session = mongoose.model('Session', sessionSchema);
 // ── Live session API ──────────────────────────────────────────────────────────
 
 async function getSession(sessionId) {
-  return Session.findById(sessionId).lean();
+  const doc = await Session.findById(sessionId).lean();
+  return doc || null;
 }
 
+/**
+ * saveSession — always uses $set so existing fields are never wiped.
+ *
+ * The old spread approach ({ ...data }) was doing a root-level replace
+ * which caused the 'state' field to disappear between requests, triggering
+ * the answers reset guard in ussdFlow.js on every subsequent call.
+ */
 async function saveSession(sessionId, data) {
+  // Flatten nested answers object into dot-notation $set keys
+  // so MongoDB merges individual answer fields rather than replacing the whole object.
+  const setPayload = {
+    _id:       sessionId,
+    expiresAt: new Date(Date.now() + 10 * 60 * 1000),
+  };
+
+  // Copy top-level fields (state, candidatePIN, detailShown, etc.)
+  for (const [k, v] of Object.entries(data)) {
+    if (k === 'answers') continue; // handled below
+    setPayload[k] = v;
+  }
+
+  // Merge individual answer keys with dot notation so other answers aren't wiped
+  if (data.answers && typeof data.answers === 'object') {
+    for (const [k, v] of Object.entries(data.answers)) {
+      setPayload[`answers.${k}`] = v;
+    }
+  }
+
   return Session.findByIdAndUpdate(
     sessionId,
-    {
-      ...data,
-      _id: sessionId,
-      expiresAt: new Date(Date.now() + 10 * 60 * 1000), // 10 min TTL
-    },
+    { $set: setPayload },
     { upsert: true, new: true }
   );
 }
@@ -95,10 +120,12 @@ async function saveFarmerRecord(phone, data) {
   return Session.findByIdAndUpdate(
     id,
     {
-      ...data,
-      _id: id,
-      phoneHash: hashPhone(phone),
-      // No expiresAt — farmer records persist indefinitely
+      $set: {
+        ...data,
+        _id:       id,
+        phoneHash: hashPhone(phone),
+        // No expiresAt — farmer records persist indefinitely
+      },
     },
     { upsert: true, new: true }
   );
@@ -110,5 +137,5 @@ module.exports = {
   deleteSession,
   getFarmerRecord,
   saveFarmerRecord,
-  hashPhone, // exported for seed.js
+  hashPhone,
 };
