@@ -38,8 +38,8 @@ const { initiateRiskAssessment } = require('./riskEngine');
 
 const S = {
   main: () =>
-    `CON Karibu FarmCredit 🌱\n` +
-    `Welcome to FarmCredit\n\n` +
+    `CON Karibu ShambAI 🌱\n` +
+    `Welcome to ShambAI\n\n` +
     `1. Pima mkopo wako\n` +
     `2. Matokeo yangu\n` +
     `3. Elimu ya malipo\n` +
@@ -143,7 +143,7 @@ const S = {
     `0. Rudi`,
 
   goodbye: () =>
-    `END Asante. Karibu tena!\nFarmCredit 🌱`,
+    `END Asante. Karibu tena!\nShambAI 🌱`,
 };
 
 // ── Label helpers ───────────────────────────────────────────────────────────
