@@ -19,12 +19,17 @@
  *   The SMS is safe to read by anyone (no sensitive language).
  *   The full USSD detail requires a 4-digit PIN set by the farmer.
  *   If she hasn't set a PIN yet, flow B asks her to create one first.
+ *
+ * Evidence architecture:
+ *   Scoring is done once in scoreWithNetwork() which calls Neo4j internally.
+ *   The full evidenceProfile is stored in the farmer record for MIS/reporting.
+ *   No duplicate Neo4j calls.
  */
 
 const { getSession, saveSession, deleteSession, getFarmerRecord, saveFarmerRecord } = require('../db/sessionStore');
 const { score, scoreWithNetwork, tierMeta } = require('./scorer');
 const { buildSMS, buildUSSDDetail, buildRepaymentLink } = require('./explainer');
-const { writeFarmerNode, getNetworkBonus } = require('../db/neo4j');
+const { writeFarmerNode } = require('../db/neo4j');
 const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
 
@@ -176,7 +181,7 @@ const loanLabel     = l => ({ '1':'Nililipa yote','2':'Nililipa sehemu','3':'Sik
 const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
 const LAND_MAP     = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
 const HERD_MAP     = { '1':'1-2','2':'3-5','3':'6-10','4':'over10' };
-const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };    // general coop / milk coop
+const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };
 const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
 const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
 const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
@@ -217,7 +222,7 @@ function mapAnswer(key, value) {
     land:     LAND_MAP,
     coop:     COOP_MAP,
     herd:     HERD_MAP,
-    milkcoop: COOP_MAP,          // uses same categories as coop
+    milkcoop: COOP_MAP,
     combined: COMBINED_MAP,
     loan:     LOAN_MAP,
     group:    GROUP_MAP,
@@ -245,10 +250,8 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
   // ══ FLOW A: New assessment ════════════════════════════════════════════════
   if (mainChoice === '1') {
-    // Retrieve or create session for this assessment flow
     let session = await getSession(sessionId);
     if (!session || session.state !== 'assess') {
-      // Start a fresh assessment
       session = { state: 'assess', answers: {} };
       await saveSession(sessionId, session);
     }
@@ -257,27 +260,22 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
     // ── 1st step: crop question ──────────────────────────────────────────────
     if (!answers.crop) {
-      if (parts.length < 2) return S.crop();   // waiting for crop answer
+      if (parts.length < 2) return S.crop();
       const cropVal = parts[1];
       if (!CROP_MAP[cropVal]) return S.invalid();
       answers.crop = CROP_MAP[cropVal];
       await saveSession(sessionId, session);
-      // Show the first question of the sequence for this crop
       const seq = SEQUENCES[answers.crop];
       return screenForKey(seq[0]);
     }
 
     // ── Collect answers using the crop‑specific sequence ─────────────────────
     const seq = SEQUENCES[answers.crop];
-    // How many sequence answers have we already stored?
     const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
 
-    // If all sequence answers are stored, we are in confirm phase
     if (storedSeqKeys.length === seq.length) {
-      // Expect confirm choice
       const lastPart = parts[parts.length - 1];
       if (lastPart === '2') {
-        // Start again
         await deleteSession(sessionId);
         return S.main();
       }
@@ -287,50 +285,36 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       }
       if (lastPart !== '1') return S.invalid();
 
-      // ── Score the farmer ───────────────────────────────────────────────
+      // ── Score the farmer ───────────────────────────────────────────────────
       const scorerInput = { crop: answers.crop };
-      // Copy all stored answers into scorerInput, using mapped values
       for (const key of seq) {
         scorerInput[key] = answers[key];
       }
-      // Add gender (always present)
       scorerInput.gender = answers.gender;
 
-      const baseResult = score(scorerInput);
       const phoneHash = hashPhone(phoneNumber);
 
-      // Write farmer node to Neo4j (fire & forget)
+      // Write farmer node to Neo4j (fire & forget — must happen before scoring
+      // so that if farmer is already in graph their node is current)
       writeFarmerNode({
         phoneHash,
-        tier:      baseResult.tier,
+        tier:      null,           // will be updated after scoring
         crop:      answers.crop,
-        land:      answers.land || null,
-        herd:      answers.herd || null,
+        land:      answers.land   || null,
+        herd:      answers.herd   || null,
         gender:    answers.gender,
-        coopName:  answers.coop !== 'none' ? 'Self-reported coop' : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
+        coopName:  answers.coop !== 'none'
+          ? 'Self-reported coop'
+          : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
         hadLoan:   answers.loan !== 'no_prior',
         repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
       }).catch(err => console.warn('Neo4j write failed:', err.message));
 
-      // Network bonus (async)
-      const networkData = await getNetworkBonus(phoneHash).catch(() => ({ bonus: 0, reason: null }));
-      const networkScore = Math.max(0, Math.min(1000, baseResult.score + networkData.bonus));
-      let networkTier;
-      if (networkScore >= 640) networkTier = 1;
-      else if (networkScore >= 420) networkTier = 2;
-      else if (networkScore >= 220) networkTier = 3;
-      else networkTier = 4;
+      // scoreWithNetwork runs base rules + Neo4j evidence in one call.
+      // No duplicate Neo4j query here.
+      const result = await scoreWithNetwork(scorerInput, phoneHash);
 
-      const result = {
-        ...baseResult,
-        score:         networkScore,
-        tier:          networkTier,
-        networkBonus:  networkData.bonus,
-        networkReason: networkData.reason,
-        baseScore:     baseResult.score,
-      };
-
-      // Save farmer record
+      // Save farmer record — include evidenceProfile for MIS/reporting
       const existing = await getFarmerRecord(phoneNumber);
       await saveFarmerRecord(phoneNumber, {
         lastScore:        result,
@@ -339,28 +323,36 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         assessmentCount:  (existing?.assessmentCount || 0) + 1,
         pinSet:           existing?.pinSet || false,
         pin:              existing?.pin    || null,
+        // Store evidence separately at top level for MIS queries
+        lastEvidence:     result.evidenceProfile || null,
       });
 
       // Send SMS asynchronously
-      const smsText = buildSMS(result);
-      sendSMS(phoneNumber, smsText).catch(err =>
-        console.error('SMS send failed:', err.message)
-      );
+// Send SMS asynchronously
+    const smsText = buildSMS(result);
+    console.log('📱 SMS CONTENT:', smsText);  // ← add here
+    sendSMS(phoneNumber, smsText).catch(err =>
+      console.error('SMS send failed:', err.message)
+    );
 
       await deleteSession(sessionId);
       return S.processing();
     }
 
     // ── Still collecting answers ──────────────────────────────────────────────
-    // The next expected key is the first key not yet stored
     const nextKey = seq[storedSeqKeys.length];
-    if (parts.length < storedSeqKeys.length + 2) {
-      // Show the question for nextKey (we are waiting for it)
-      return screenForKey(nextKey);
-    }
 
-    // We have a new answer (the last part)
-    const answerValue = parts[parts.length - 1];
+// parts: ['1', cropAnswer, seqAnswer1, seqAnswer2, ...]
+// parts[0] = '1' (flow), parts[1] = crop, parts[2+] = sequence answers
+// So sequence answers start at index 2
+const seqAnswersInParts = parts.length - 2; // subtract flow choice + crop
+
+if (seqAnswersInParts <= storedSeqKeys.length) {
+  // Haven't received the answer for nextKey yet — show the question
+  return screenForKey(nextKey);
+}
+
+const answerValue = parts[storedSeqKeys.length + 2]; // precise index
     const map = {
       land: LAND_MAP, coop: COOP_MAP, herd: HERD_MAP, milkcoop: COOP_MAP,
       combined: COMBINED_MAP, loan: LOAN_MAP, group: GROUP_MAP,
@@ -371,13 +363,10 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     answers[nextKey] = mapped;
     await saveSession(sessionId, session);
 
-    // After storing, check if we just collected the last sequence key
     const newStoredLen = seq.filter(k => answers.hasOwnProperty(k)).length;
     if (newStoredLen === seq.length) {
-      // All sequence answers collected – show confirm screen
       return S.confirm(answers);
     }
-    // Otherwise, show the next question
     return screenForKey(seq[newStoredLen]);
   }
 
