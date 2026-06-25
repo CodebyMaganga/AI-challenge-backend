@@ -198,6 +198,7 @@ function screenForKey(key) {
     cropType: S.cropType,
     cropSeason: S.cropSeason,
     pastLoan: S.pastLoan,
+    gender: S.gender, // add this
   };
   return screens[key] ? screens[key]() : S.invalid();
 }
@@ -268,6 +269,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       // We have an answer value
       const rawValue = parts[answerIndex];
       let mapped = mapAnswer(nextKey, rawValue);
+     
 
       // Special handling for free-text location (option 5)
       if (nextKey === 'location' && rawValue === '5') {

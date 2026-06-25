@@ -2,7 +2,7 @@
  * simulate.js — run with: npm test
  *
  * Simulates the Africa's Talking USSD webhook locally.
- * Runs three full journeys and prints every screen.
+ * Runs three full journeys through the new loan assessment flow.
  *
  * No real phone or AT account needed — just MongoDB.
  */
@@ -40,40 +40,40 @@ async function run() {
   await mongoose.connect(process.env.MONGO_URI);
   console.log('✅ Connected\n');
 
-  // Journey 1: Grace — strong profile, full assessment
+  // ── Journey 1: Grace — strong profile (dairy, year‑round) ─────────────────
   await journey('Grace (Tier 1 — strong profile)', '+254700000001', [
     '',     // dial → main menu
-    '1',    // → crop
-    '3',    // dairy → land
-    '2',    // 1–3 acres → coop
-    '1',    // active 2+ yrs → loan
-    '1',    // fully repaid → group
-    '1',    // active saving → mpesa
-    '2',    // weekly → gender
-    '1',    // female → confirm
+    '1',    // 1. Apply for loan
+    '1',    // consent: Ndio
+    '1',    // location: Kiambu
+    '3',    // farm size: 2‑5 acres
+    '3',    // crop type: Dairy
+    '3',    // crop season: year‑round
+    '1',    // past loan: fully repaid
+    '1',    // gender: female
     '1',    // confirm → score + SMS
   ]);
 
-  // Journey 2: Amina — thin file, no prior loan, equity adjustment
+  // ── Journey 2: Amina — thin file, no prior loan ────────────────────────────
   await journey('Amina (Tier 3 — thin file)', '+254700000002', [
     '',     // dial
     '1',    // assessment
-    '4',    // horticulture
-    '1',    // under 1 acre
-    '4',    // no coop
-    '5',    // no prior loan
-    '2',    // chama occasionally
-    '3',    // monthly mpesa
-    '1',    // female
+    '1',    // consent: Ndio
+    '3',    // location: Machakos
+    '1',    // farm size: under 0.5 acres
+    '4',    // crop type: horticulture
+    '1',    // crop season: long rains
+    '5',    // past loan: no prior
+    '1',    // gender: female
     '1',    // confirm
   ]);
 
-  // Journey 3: Grace views her result with PIN
+  // ── Journey 3: Grace views her result with PIN ─────────────────────────────
   await journey('Grace — view result with PIN', '+254700000001', [
     '',     // dial
-    '2',    // view result
-    '1234', // PIN
-    '1',    // repayment education
+    '2',    // view my result
+    '1234', // PIN (set on first access, after journey 1 she has it)
+    '1',    // see repayment education
   ]);
 
   await mongoose.disconnect();
