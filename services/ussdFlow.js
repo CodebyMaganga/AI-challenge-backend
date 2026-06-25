@@ -277,17 +277,17 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
     // ── 1st step: crop question ──────────────────────────────────────────────
     if (!answers.crop) {
-      if (parts.length < 2) return S.crop();
-      const cropVal = parts[1];
-      if (!CROP_MAP[cropVal]) return S.invalid();
-      answers.crop = CROP_MAP[cropVal];
-      await saveSession(sessionId, session);
-      const seq = SEQUENCES[answers.crop];
-      return screenForKey(seq[0]);
-    }
+  if (parts.length < 2) return S.crop();
+  const cropVal = parts[1];
+  if (!CROP_MAP[cropVal]) return S.invalid();
+  answers.crop = CROP_MAP[cropVal];
+  await saveSession(sessionId, session);
+  const seq = SEQUENCES[answers.crop] || SEQUENCES['default'];  // ← fix
+  return screenForKey(seq[0]);
+}
 
     // ── Collect answers using the crop‑specific sequence ─────────────────────
-    const seq = SEQUENCES[answers.crop];
+    const seq = SEQUENCES[answers.crop] || SEQUENCES['default'];
     const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
 
     if (storedSeqKeys.length === seq.length) {
