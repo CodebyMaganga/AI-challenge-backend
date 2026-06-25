@@ -1,5 +1,5 @@
 /**
- * ussdFlow.js — USSD session state machine (kenyan-street-swa version)
+ * ussdFlow.js — USSD session state machine (updated for risk engine)
  *
  * Africa's Talking sends the full accumulated input on every keypress.
  * `text` looks like: "" → "1" → "1*2" → "1*2*3" etc.
@@ -7,7 +7,7 @@
  * We split on '*' and route based on depth + first choice.
  *
  * Flow A — New assessment (text starts with "1"):
- *   1 → crop → productionSize → coop → loan → group → mpesa → gender → confirm → score
+ *   1 → consent → location → farmSize → cropType → cropSeason → pastLoan → confirm → score
  *
  * Flow B — View my result (text starts with "2"):
  *   2 → enter PIN → show detail OR set PIN if first time
@@ -20,18 +20,19 @@
  *   The full USSD detail requires a 4-digit PIN set by the farmer.
  *   If she hasn't set a PIN yet, flow B asks her to create one first.
  *
- * Evidence architecture:
- *   Scoring is done once in scoreWithNetwork() which calls Neo4j internally.
- *   The full evidenceProfile is stored in the farmer record for MIS/reporting.
- *   No duplicate Neo4j calls.
+ * New risk assessment pipeline:
+ *   After confirmation, the backend fetches external data (M‑Pesa, weather),
+ *   runs Neo4j graph queries, and calculates a final score.
+ *   No duplicate calls — scoring is done once.
  */
 
 const { getSession, saveSession, deleteSession, getFarmerRecord, saveFarmerRecord } = require('../db/sessionStore');
-const { score, scoreWithNetwork, tierMeta } = require('./scorer');
 const { buildSMS, buildUSSDDetail, buildRepaymentLink } = require('./explainer');
 const { writeFarmerNode } = require('../db/neo4j');
 const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
+// Placeholder for the real risk assessment engine
+const { initiateRiskAssessment } = require('./riskEngine');
 
 // ── Screen builders (Kenyan-market Swahili) ─────────────────────────────────
 
@@ -44,7 +45,31 @@ const S = {
     `3. Elimu ya malipo\n` +
     `0. Toka`,
 
-  crop: () =>
+  // New consent screen
+  mpesaConsent: () =>
+    `CON Tunaweza kuangalia taarifa za M-Pesa yako?\n` +
+    `Hii itatusaidia kujua uwezo wako wa mkopo.\n\n` +
+    `1. Ndio, nina ruhusa\n` +
+    `2. Hapana`,
+
+  // New location screen (simplified — you may extend with more counties)
+  location: () =>
+    `CON Shamba lako liko kaunti gani?\n\n` +
+    `1. Kiambu\n` +
+    `2. Murang'a\n` +
+    `3. Machakos\n` +
+    `4. Nakuru\n` +
+    `5. Ingiza jina la kaunti`,
+
+  farmSize: () =>
+    `CON Ukubwa wa shamba lako ni eka ngapi?\n\n` +
+    `1. Chini ya 0.5\n` +
+    `2. 0.5 - 2\n` +
+    `3. 2 - 5\n` +
+    `4. 5 - 10\n` +
+    `5. Zaidi ya 10`,
+
+  cropType: () =>
     `CON Unalima nini hasa?\n\n` +
     `1. Mahindi\n` +
     `2. Maharagwe\n` +
@@ -52,20 +77,13 @@ const S = {
     `4. Mboga/Matunda\n` +
     `5. Mchanganyiko`,
 
-  productionSize: () =>
-    `CON Ukubwa wa uzalishaji wako?\n\n` +
-    `1. Mdogo (kaya tu)\n` +
-    `2. Wastani (kuuza sehemu)\n` +
-    `3. Mkubwa (biashara)`,
+  cropSeason: () =>
+    `CON Unapanda msimu gani?\n\n` +
+    `1. Masika (March-May)\n` +
+    `2. Vuli (Oct-Dec)\n` +
+    `3. Kilimo cha mwaka mzima`,
 
-  coop: () =>
-    `CON Uko kwenye ushirika wa kilimo?\n\n` +
-    `1. Ndio, miaka 2+ (active)\n` +
-    `2. Ndio, chini ya miaka 2\n` +
-    `3. Ndio, lakini sio active\n` +
-    `4. Hapana`,
-
-  loan: () =>
+  pastLoan: () =>
     `CON Umewahi kupata mkopo?\n\n` +
     `1. Ndio, nimelipa yote\n` +
     `2. Ndio, nimelipa sehemu\n` +
@@ -73,34 +91,20 @@ const S = {
     `4. Mkopo wa chama nililipa\n` +
     `5. Hapana, huu ni wa kwanza`,
 
-  group: () =>
-    `CON Uko kwenye chama cha akiba?\n\n` +
-    `1. Ndio, nachangia kila wakati\n` +
-    `2. Ndio, wakati mwingine\n` +
-    `3. Hapana`,
-
-  mpesa: () =>
-    `CON Unatumia M-Pesa aje?\n\n` +
-    `1. Kila siku\n` +
-    `2. Kila wiki\n` +
-    `3. Kila mwezi\n` +
-    `4. Mara chache`,
-
   gender: () =>
-    `CON Swali la mwisho: Jinsia?\n\n` +
-    `1. Mwanamke\n` +
-    `2. Mwanaume\n` +
-    `3. Sitaki kusema`,
+  `CON Swali la mwisho: Jinsia?\n\n` +
+  `1. Mwanamke\n` +
+  `2. Mwanaume\n` +
+  `3. Sitaki kusema`,
 
   confirm: (answers) => {
     return `CON Hakikisha:\n\n` +
-      `Zao: ${cropLabel(answers.crop)}\n` +
-      `Uzalishaji: ${productionSizeLabel(answers.productionSize)}\n` +
-      `Ushirika: ${coopLabel(answers.coop)}\n` +
-      `Mkopo: ${loanLabel(answers.loan)}\n` +
-      `Chama: ${groupLabel(answers.group)}\n` +
-      `M-Pesa: ${mpesaLabel(answers.mpesa)}\n` +
-      `Jinsia: ${genderLabel(answers.gender)}\n\n` +
+      `Ruhusa M-Pesa: ${answers.mpesaConsent ? 'Ndio' : 'Hapana'}\n` +
+      `Kaunti: ${answers.location}\n` +
+      `Shamba: ${answers.farmSize}\n` +
+      `Zao: ${answers.cropType}\n` +
+      `Msimu: ${answers.cropSeason}\n` +
+      `Mkopo uliopita: ${pastLoanLabel(answers.pastLoan)}\n\n` +
       `1. Hakikisha, pata matokeo\n` +
       `2. Anza upya\n` +
       `0. Toka`;
@@ -142,111 +146,77 @@ const S = {
     `END Asante. Karibu tena!\nFarmCredit 🌱`,
 };
 
-// ── Label helpers (confirm screen) ───────────────────────────────────────────
+// ── Label helpers ───────────────────────────────────────────────────────────
 
-const cropLabel = (c) => ({
-  maize: 'Mahindi',
-  beans: 'Maharagwe',
-  dairy: 'Maziwa',
-  horticulture: 'Mboga',
-  mixed: 'Mchanganyiko'
-}[c] || '?');
-
-const productionSizeLabel = (p) => ({
-  small: 'Mdogo',
-  medium: 'Wastani',
-  large: 'Mkubwa'
-}[p] || '?');
-
-const coopLabel = (c) => ({
-  active_over2yr: 'Miaka 2+',
-  active_under2yr: '<Miaka 2',
-  inactive: 'Sio active',
-  none: 'Hapana'
-}[c] || '?');
-
-const loanLabel = (l) => ({
-  'repaid_full': 'Nililipa yote',
-  'repaid_partial': 'Nililipa sehemu',
+const pastLoanLabel = (l) => ({
+  'repaid_full': 'Nimelipa yote',
+  'repaid_partial': 'Nimelipa sehemu',
   'defaulted': 'Sikulipa',
   'repaid_chama': 'Mkopo wa chama',
   'no_prior': 'Mkopo wa kwanza'
 }[l] || '?');
 
-const groupLabel = (g) => ({
-  'active_saving': 'Nachangia kila wakati',
-  'occasional': 'Wakati mwingine',
-  'none': 'Hapana'
-}[g] || '?');
-
-const mpesaLabel = (m) => ({
-  'daily': 'Kila siku',
-  'weekly': 'Kila wiki',
-  'monthly': 'Kila mwezi',
-  'rarely': 'Mara chache'
-}[m] || '?');
-
-const genderLabel = (g) => ({
-  'female': 'Mwanamke',
-  'male': 'Mwanaume',
-  'unspecified': 'Sitaki kusema'
-}[g] || '?');
-
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
 
-const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
-const LAND_MAP     = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
-const HERD_MAP     = { '1':'1-2','2':'3-5','3':'6-10','4':'over10' };
-const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };
-const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
-const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
-const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
-const GENDER_MAP   = { '1':'female','2':'male','3':'unspecified' };
-const COMBINED_MAP = { '1':'small_farm_few','2':'medium_farm_moderate','3':'large_farm_many','4':'very_large_farm_many' };
-
-// ── Question sequences per crop ──────────────────────────────────────────────
-
-const SEQUENCES = {
-  default: [
-    'productionSize',
-    'coop',
-    'loan',
-    'group',
-    'mpesa',
-    'gender'
-  ]
+const MPESA_CONSENT_MAP = { '1': true, '2': false };
+const LOCATION_MAP = {
+  '1': 'kiambu',
+  '2': 'muranga',
+  '3': 'machakos',
+  '4': 'nakuru',
+  // '5' will be handled as free text later
 };
+const FARM_SIZE_MAP = { '1': '<0.5', '2': '0.5-2', '3': '2-5', '4': '5-10', '5': '>10' };
+const CROP_TYPE_MAP = { '1': 'maize', '2': 'beans', '3': 'dairy', '4': 'horticulture', '5': 'mixed' };
+const CROP_SEASON_MAP = { '1': 'long_rains', '2': 'short_rains', '3': 'year_round' };
+const PAST_LOAN_MAP = {
+  '1': 'repaid_full',
+  '2': 'repaid_partial',
+  '3': 'defaulted',
+  '4': 'repaid_chama',
+  '5': 'no_prior',
+};
+const GENDER_MAP = { '1': 'female', '2': 'male', '3': 'unspecified' };
+
+// ── New fixed sequence (no branching) ─────────────────────────────────────────
+const SEQUENCE = [
+  'mpesaConsent',
+  'location',
+  'farmSize',
+  'cropType',
+  'cropSeason',
+  'pastLoan',
+  'gender', 
+];
 
 // ── Next question screen based on key ────────────────────────────────────────
-
 function screenForKey(key) {
   const screens = {
-    productionSize: S.productionSize,
-    coop: S.coop,
-    loan: S.loan,
-    group: S.group,
-    mpesa: S.mpesa,
-    gender: S.gender
+    mpesaConsent: S.mpesaConsent,
+    location: S.location,
+    farmSize: S.farmSize,
+    cropType: S.cropType,
+    cropSeason: S.cropSeason,
+    pastLoan: S.pastLoan,
   };
-  
   return screens[key] ? screens[key]() : S.invalid();
 }
 
 // ── Map answer value to scorer key ──────────────────────────────────────────
-
 function mapAnswer(key, value) {
   const maps = {
-    land:     LAND_MAP,
-    coop:     COOP_MAP,
-    herd:     HERD_MAP,
-    milkcoop: COOP_MAP,
-    combined: COMBINED_MAP,
-    loan:     LOAN_MAP,
-    group:    GROUP_MAP,
-    mpesa:    MPESA_MAP,
-    gender:   GENDER_MAP,
-    crop:     CROP_MAP,
+    mpesaConsent: MPESA_CONSENT_MAP,
+    location: LOCATION_MAP,       // fallback handled separately for '5'
+    farmSize: FARM_SIZE_MAP,
+    cropType: CROP_TYPE_MAP,
+    cropSeason: CROP_SEASON_MAP,
+    pastLoan: PAST_LOAN_MAP,
+    gender: GENDER_MAP,
   };
+  if (key === 'location' && value === '5') {
+    // The next screen will capture the name as text — but for simplicity we'll treat it as is.
+    return 'free_text'; // will be replaced when free text is entered
+  }
   return (maps[key] && maps[key][value]) || value;
 }
 
@@ -274,123 +244,129 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     }
 
     const answers = session.answers;
+    const storedKeys = SEQUENCE.filter(k => answers.hasOwnProperty(k));
 
-    // ── 1st step: crop question ──────────────────────────────────────────────
-    if (!answers.crop) {
-  if (parts.length < 2) return S.crop();
-  const cropVal = parts[1];
-  if (!CROP_MAP[cropVal]) return S.invalid();
-  answers.crop = CROP_MAP[cropVal];
-  await saveSession(sessionId, session);
-  const seq = SEQUENCES[answers.crop] || SEQUENCES['default'];  // ← fix
-  return screenForKey(seq[0]);
-}
-
-    // ── Collect answers using the crop‑specific sequence ─────────────────────
-    const seq = SEQUENCES[answers.crop] || SEQUENCES['default'];
-    const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
-
-    if (storedSeqKeys.length === seq.length) {
-      const lastPart = parts[parts.length - 1];
-      
-      if (lastPart === '2') {
-        await deleteSession(sessionId);
-        return S.main();
-      }
-      
-      if (lastPart === '0') {
-        await deleteSession(sessionId);
-        return S.goodbye();
-      }
-      
-      if (lastPart !== '1') {
-        return S.invalid();
+    // If we haven't collected all answers, keep asking
+    if (storedKeys.length < SEQUENCE.length) {
+      const nextKey = SEQUENCE[storedKeys.length];
+      // If this is the first question and we are at the right depth
+      if (parts.length === 1 && storedKeys.length === 0) {
+        // Show first question (consent)
+        return screenForKey(nextKey);
       }
 
-      // ── Score the farmer ───────────────────────────────────────────────────
-      const scorerInput = { crop: answers.crop };
-      for (const key of seq) {
-        scorerInput[key] = answers[key];
+      // For subsequent answers: parts[0]='1', then answers come in order.
+      // The answer we need is at index = storedKeys.length + 1? Wait.
+      // The first answer (consent) is at parts[1], second at parts[2], etc.
+      // Because parts = ['1', answer1, answer2, ...]
+      const answerIndex = storedKeys.length + 1;
+      if (parts.length <= answerIndex) {
+        // Still waiting for input for the current question
+        return screenForKey(nextKey);
       }
-      scorerInput.gender = answers.gender;
 
-      const phoneHash = hashPhone(phoneNumber);
+      // We have an answer value
+      const rawValue = parts[answerIndex];
+      let mapped = mapAnswer(nextKey, rawValue);
 
-      // Write farmer node to Neo4j (fire & forget — must happen before scoring
-      // so that if farmer is already in graph their node is current)
-      writeFarmerNode({
-        phoneHash,
-        tier:      null,           // will be updated after scoring
-        crop:      answers.crop,
-        land:      answers.land   || null,
-        herd:      answers.herd   || null,
-        gender:    answers.gender,
-        coopName:  answers.coop !== 'none'
-          ? 'Self-reported coop'
-          : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
-        hadLoan:   answers.loan !== 'no_prior',
-        repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
-      }).catch(err => console.warn('Neo4j write failed:', err.message));
+      // Special handling for free-text location (option 5)
+      if (nextKey === 'location' && rawValue === '5') {
+        // Expect the next part to be the text; we'll treat it as a special case
+        // For simplicity, we'll allow a two-step location: first select 5, then enter name.
+        if (parts.length === answerIndex + 1) {
+          // Wait for the free text (this would be a separate screen)
+          // We need a helper to ask for text. We'll define a locationText screen.
+          return `CON Ingiza jina la kaunti yako:`;
+        }
+        // When the user enters the text, it will be in the next part
+        // We'll treat it as a direct answer for location
+        // So we need to adjust: after selecting 5, the next input becomes the location.
+        // This complicates the flow. To avoid complexity, I'll restrict to predefined counties for now.
+        // If you absolutely need free text, a different state machine logic is required.
+        // For this draft, we'll just map '5' to 'other'.
+        mapped = 'other'; // fallback
+      }
 
-      // scoreWithNetwork runs base rules + Neo4j evidence in one call.
-      // No duplicate Neo4j query here.
-      const result = await scoreWithNetwork(scorerInput, phoneHash);
+      if (mapped === undefined) return S.invalid();
 
-      // Save farmer record — include evidenceProfile for MIS/reporting
-      const existing = await getFarmerRecord(phoneNumber);
-      await saveFarmerRecord(phoneNumber, {
-        lastScore:        result,
-        lastTier:         result.tier,
-        lastScoredAt:     result.scoredAt,
-        assessmentCount:  (existing?.assessmentCount || 0) + 1,
-        pinSet:           existing?.pinSet || false,
-        pin:              existing?.pin    || null,
-        // Store evidence separately at top level for MIS queries
-        lastEvidence:     result.evidenceProfile || null,
-      });
+      answers[nextKey] = mapped;
+      await saveSession(sessionId, session);
 
-      // Send SMS asynchronously
-// Send SMS asynchronously
+      // After answering, check if we are done
+      const newStoredLen = SEQUENCE.filter(k => answers.hasOwnProperty(k)).length;
+      if (newStoredLen === SEQUENCE.length) {
+        return S.confirm(answers);
+      }
+      // Show next question
+      return screenForKey(SEQUENCE[newStoredLen]);
+    }
+
+    // All answers collected, now handle confirm screen options
+    const lastPart = parts[parts.length - 1];
+
+    if (lastPart === '2') {
+      // Start over
+      await deleteSession(sessionId);
+      return S.main();
+    }
+
+    if (lastPart === '0') {
+      await deleteSession(sessionId);
+      return S.goodbye();
+    }
+
+    if (lastPart !== '1') {
+      return S.invalid();
+    }
+
+    // ── User confirmed → run risk assessment ──────────────────────────────
+    const applicationData = {
+      phone: phoneNumber,
+      consent: answers.mpesaConsent,
+      location: answers.location,
+      farmSize: answers.farmSize,
+      cropType: answers.cropType,
+      cropSeason: answers.cropSeason,
+      pastLoan: answers.pastLoan,
+      gender: answers.gender,
+    };
+
+    const phoneHash = hashPhone(phoneNumber);
+
+    // Write farmer node to Neo4j (async) — basic identity
+    writeFarmerNode({
+      phoneHash,
+      tier: null,
+      crop: answers.cropType,
+      land: answers.farmSize,
+      gender: null, // no longer collected; you can add if needed
+      location: answers.location,
+    }).catch(err => console.warn('Neo4j write failed:', err.message));
+
+    // Call the external risk engine (fetches M‑Pesa, weather, graph)
+    const result = await initiateRiskAssessment(applicationData, phoneHash);
+
+    // Save farmer record in MongoDB for later retrieval
+    const existing = await getFarmerRecord(phoneNumber);
+    await saveFarmerRecord(phoneNumber, {
+      lastScore: result,
+      lastTier: result.tier,
+      lastScoredAt: result.scoredAt,
+      assessmentCount: (existing?.assessmentCount || 0) + 1,
+      pinSet: existing?.pinSet || false,
+      pin: existing?.pin || null,
+      lastEvidence: result.evidenceProfile || null,
+    });
+
+    // Send SMS asynchronously
     const smsText = buildSMS(result);
-    console.log('📱 SMS CONTENT:', smsText);  // ← add here
+    console.log('📱 SMS CONTENT:', smsText);
     sendSMS(phoneNumber, smsText).catch(err =>
       console.error('SMS send failed:', err.message)
     );
 
-      await deleteSession(sessionId);
-      return S.processing();
-    }
-
-    // ── Still collecting answers ──────────────────────────────────────────────
-    const nextKey = seq[storedSeqKeys.length];
-
-// parts: ['1', cropAnswer, seqAnswer1, seqAnswer2, ...]
-// parts[0] = '1' (flow), parts[1] = crop, parts[2+] = sequence answers
-// So sequence answers start at index 2
-const seqAnswersInParts = parts.length - 2; // subtract flow choice + crop
-
-if (seqAnswersInParts <= storedSeqKeys.length) {
-  // Haven't received the answer for nextKey yet — show the question
-  return screenForKey(nextKey);
-}
-
-const answerValue = parts[storedSeqKeys.length + 2]; // precise index
-    const map = {
-      land: LAND_MAP, coop: COOP_MAP, herd: HERD_MAP, milkcoop: COOP_MAP,
-      combined: COMBINED_MAP, loan: LOAN_MAP, group: GROUP_MAP,
-      mpesa: MPESA_MAP, gender: GENDER_MAP,
-    };
-    const mapped = map[nextKey] ? map[nextKey][answerValue] : undefined;
-    if (mapped === undefined) return S.invalid();
-    answers[nextKey] = mapped;
-    await saveSession(sessionId, session);
-
-    const newStoredLen = seq.filter(k => answers.hasOwnProperty(k)).length;
-    
-    if (newStoredLen === seq.length) {
-      return S.confirm(answers);
-    }
-    return screenForKey(seq[newStoredLen]);
+    await deleteSession(sessionId);
+    return S.processing();
   }
 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════
@@ -438,12 +414,11 @@ const answerValue = parts[storedSeqKeys.length + 2]; // precise index
     if (fd === 2 && parts[2] === '1') {
       return buildRepaymentLink(farmerRecord.lastTier);
     }
-    
-    // Handle other options in detail view
     if (fd === 2 && parts[2] === '0') {
       await deleteSession(sessionId);
       return S.goodbye();
     }
+    return S.invalid();
   }
 
   // ══ FLOW C: Repayment & credit education ══════════════════════════════════
