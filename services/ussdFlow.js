@@ -19,12 +19,17 @@
  *   The SMS is safe to read by anyone (no sensitive language).
  *   The full USSD detail requires a 4-digit PIN set by the farmer.
  *   If she hasn't set a PIN yet, flow B asks her to create one first.
+ *
+ * Evidence architecture:
+ *   Scoring is done once in scoreWithNetwork() which calls Neo4j internally.
+ *   The full evidenceProfile is stored in the farmer record for MIS/reporting.
+ *   No duplicate Neo4j calls.
  */
 
 const { getSession, saveSession, deleteSession, getFarmerRecord, saveFarmerRecord } = require('../db/sessionStore');
 const { score, scoreWithNetwork, tierMeta } = require('./scorer');
 const { buildSMS, buildUSSDDetail, buildRepaymentLink } = require('./explainer');
-const { writeFarmerNode, getNetworkBonus } = require('../db/neo4j');
+const { writeFarmerNode } = require('../db/neo4j');
 const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
 
@@ -189,53 +194,15 @@ const genderLabel = (g) => ({
 
 // ── Answer maps → scorer keys ─────────────────────────────────────────────────
 
-const CROP_MAP = { 
-  '1': 'maize', 
-  '2': 'beans', 
-  '3': 'dairy', 
-  '4': 'horticulture', 
-  '5': 'mixed' 
-};
-
-const PRODUCTION_MAP = {
-  '1': 'small',
-  '2': 'medium',
-  '3': 'large'
-};
-
-const COOP_MAP = { 
-  '1': 'active_over2yr', 
-  '2': 'active_under2yr', 
-  '3': 'inactive', 
-  '4': 'none' 
-};
-
-const LOAN_MAP = { 
-  '1': 'repaid_full', 
-  '2': 'repaid_partial', 
-  '3': 'defaulted', 
-  '4': 'repaid_chama', 
-  '5': 'no_prior' 
-};
-
-const GROUP_MAP = { 
-  '1': 'active_saving', 
-  '2': 'occasional', 
-  '3': 'none' 
-};
-
-const MPESA_MAP = { 
-  '1': 'daily', 
-  '2': 'weekly', 
-  '3': 'monthly', 
-  '4': 'rarely' 
-};
-
-const GENDER_MAP = { 
-  '1': 'female', 
-  '2': 'male', 
-  '3': 'unspecified' 
-};
+const CROP_MAP     = { '1':'maize','2':'beans','3':'dairy','4':'horticulture','5':'mixed' };
+const LAND_MAP     = { '1':'under1','2':'one_three','3':'three_ten','4':'over10' };
+const HERD_MAP     = { '1':'1-2','2':'3-5','3':'6-10','4':'over10' };
+const COOP_MAP     = { '1':'active_over2yr','2':'active_under2yr','3':'inactive','4':'none' };
+const LOAN_MAP     = { '1':'repaid_full','2':'repaid_partial','3':'defaulted','4':'repaid_chama','5':'no_prior' };
+const GROUP_MAP    = { '1':'active_saving','2':'occasional','3':'none' };
+const MPESA_MAP    = { '1':'daily','2':'weekly','3':'monthly','4':'rarely' };
+const GENDER_MAP   = { '1':'female','2':'male','3':'unspecified' };
+const COMBINED_MAP = { '1':'small_farm_few','2':'medium_farm_moderate','3':'large_farm_many','4':'very_large_farm_many' };
 
 // ── Question sequences per crop ──────────────────────────────────────────────
 
@@ -269,20 +236,18 @@ function screenForKey(key) {
 
 function mapAnswer(key, value) {
   const maps = {
-    productionSize: PRODUCTION_MAP,
-    coop: COOP_MAP,
-    loan: LOAN_MAP,
-    group: GROUP_MAP,
-    mpesa: MPESA_MAP,
-    gender: GENDER_MAP
+    land:     LAND_MAP,
+    coop:     COOP_MAP,
+    herd:     HERD_MAP,
+    milkcoop: COOP_MAP,
+    combined: COMBINED_MAP,
+    loan:     LOAN_MAP,
+    group:    GROUP_MAP,
+    mpesa:    MPESA_MAP,
+    gender:   GENDER_MAP,
+    crop:     CROP_MAP,
   };
-  
-  if (!maps[key]) return undefined;
-  const mapped = maps[key][value];
-  
-  // Log for debugging
-  console.log(`Mapping ${key} with value ${value} -> ${mapped}`);
-  return mapped;
+  return (maps[key] && maps[key][value]) || value;
 }
 
 // ── Main handler ─────────────────────────────────────────────────────────────
@@ -302,10 +267,8 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
   // ══ FLOW A: New assessment ════════════════════════════════════════════════
   if (mainChoice === '1') {
-    // Retrieve or create session for this assessment flow
     let session = await getSession(sessionId);
     if (!session || session.state !== 'assess') {
-      // Start a fresh assessment
       session = { state: 'assess', answers: {} };
       await saveSession(sessionId, session);
     }
@@ -314,35 +277,23 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
     // ── 1st step: crop question ──────────────────────────────────────────────
     if (!answers.crop) {
-      if (parts.length < 2) return S.crop();   // waiting for crop answer
+      if (parts.length < 2) return S.crop();
       const cropVal = parts[1];
       if (!CROP_MAP[cropVal]) return S.invalid();
       answers.crop = CROP_MAP[cropVal];
       await saveSession(sessionId, session);
-      // Show the first question of the sequence for this crop
-      const seq = SEQUENCES.default;
-      const firstQuestion = seq[0]; // 'productionSize'
-      return screenForKey(firstQuestion);
+      const seq = SEQUENCES[answers.crop];
+      return screenForKey(seq[0]);
     }
 
     // ── Collect answers using the crop‑specific sequence ─────────────────────
-    const seq = SEQUENCES.default;
-    
-    // Count how many sequence answers we have stored
-    let storedSeqKeys = [];
-    for (let key of seq) {
-      if (answers.hasOwnProperty(key)) {
-        storedSeqKeys.push(key);
-      }
-    }
+    const seq = SEQUENCES[answers.crop];
+    const storedSeqKeys = seq.filter(key => answers.hasOwnProperty(key));
 
-    // If all sequence answers are stored, we are in confirm phase
     if (storedSeqKeys.length === seq.length) {
-      // Expect confirm choice
       const lastPart = parts[parts.length - 1];
       
       if (lastPart === '2') {
-        // Start again
         await deleteSession(sessionId);
         return S.main();
       }
@@ -356,118 +307,90 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         return S.invalid();
       }
 
-      // ── Score the farmer ───────────────────────────────────────────────
+      // ── Score the farmer ───────────────────────────────────────────────────
       const scorerInput = { crop: answers.crop };
-      
-      // Copy all stored answers into scorerInput, using mapped values
       for (const key of seq) {
         scorerInput[key] = answers[key];
       }
-      
-      // Add gender (always present)
       scorerInput.gender = answers.gender;
 
-      const baseResult = score(scorerInput);
       const phoneHash = hashPhone(phoneNumber);
 
-      // Write farmer node to Neo4j (fire & forget)
+      // Write farmer node to Neo4j (fire & forget — must happen before scoring
+      // so that if farmer is already in graph their node is current)
       writeFarmerNode({
         phoneHash,
-        tier: baseResult.tier,
-        crop: answers.crop,
-        productionSize: answers.productionSize,
-        gender: answers.gender,
-        coopName: answers.coop !== 'none' ? 'Self-reported coop' : null,
-        hadLoan: answers.loan !== 'no_prior',
-        repaid: answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
+        tier:      null,           // will be updated after scoring
+        crop:      answers.crop,
+        land:      answers.land   || null,
+        herd:      answers.herd   || null,
+        gender:    answers.gender,
+        coopName:  answers.coop !== 'none'
+          ? 'Self-reported coop'
+          : (answers.milkcoop && answers.milkcoop !== 'none' ? 'Milk coop' : null),
+        hadLoan:   answers.loan !== 'no_prior',
+        repaid:    answers.loan === 'repaid_full' || answers.loan === 'repaid_chama',
       }).catch(err => console.warn('Neo4j write failed:', err.message));
 
-      // Network bonus (async)
-      const networkData = await getNetworkBonus(phoneHash).catch(() => ({ bonus: 0, reason: null }));
-      const networkScore = Math.max(0, Math.min(1000, baseResult.score + networkData.bonus));
-      let networkTier;
-      if (networkScore >= 640) networkTier = 1;
-      else if (networkScore >= 420) networkTier = 2;
-      else if (networkScore >= 220) networkTier = 3;
-      else networkTier = 4;
+      // scoreWithNetwork runs base rules + Neo4j evidence in one call.
+      // No duplicate Neo4j query here.
+      const result = await scoreWithNetwork(scorerInput, phoneHash);
 
-      const result = {
-        ...baseResult,
-        score: networkScore,
-        tier: networkTier,
-        networkBonus: networkData.bonus,
-        networkReason: networkData.reason,
-        baseScore: baseResult.score,
-      };
-
-      // Save farmer record
+      // Save farmer record — include evidenceProfile for MIS/reporting
       const existing = await getFarmerRecord(phoneNumber);
       await saveFarmerRecord(phoneNumber, {
-        lastScore: result,
-        lastTier: result.tier,
-        lastScoredAt: result.scoredAt,
-        assessmentCount: (existing?.assessmentCount || 0) + 1,
-        pinSet: existing?.pinSet || false,
-        pin: existing?.pin || null,
+        lastScore:        result,
+        lastTier:         result.tier,
+        lastScoredAt:     result.scoredAt,
+        assessmentCount:  (existing?.assessmentCount || 0) + 1,
+        pinSet:           existing?.pinSet || false,
+        pin:              existing?.pin    || null,
+        // Store evidence separately at top level for MIS queries
+        lastEvidence:     result.evidenceProfile || null,
       });
 
       // Send SMS asynchronously
-      const smsText = buildSMS(result);
-      sendSMS(phoneNumber, smsText).catch(err =>
-        console.error('SMS send failed:', err.message)
-      );
+// Send SMS asynchronously
+    const smsText = buildSMS(result);
+    console.log('📱 SMS CONTENT:', smsText);  // ← add here
+    sendSMS(phoneNumber, smsText).catch(err =>
+      console.error('SMS send failed:', err.message)
+    );
 
       await deleteSession(sessionId);
       return S.processing();
     }
 
     // ── Still collecting answers ──────────────────────────────────────────────
-    // Find the next expected key (first key not yet stored)
-    let nextKey = null;
-    for (let key of seq) {
-      if (!answers.hasOwnProperty(key)) {
-        nextKey = key;
-        break;
-      }
-    }
+    const nextKey = seq[storedSeqKeys.length];
 
-    if (!nextKey) {
-      // Should not happen, but just in case
-      return S.confirm(answers);
-    }
+// parts: ['1', cropAnswer, seqAnswer1, seqAnswer2, ...]
+// parts[0] = '1' (flow), parts[1] = crop, parts[2+] = sequence answers
+// So sequence answers start at index 2
+const seqAnswersInParts = parts.length - 2; // subtract flow choice + crop
 
-    // Check if we have the answer for the next question in the input
-    // The position of the answer in parts array: storedSeqKeys.length + 2
-    const expectedPartIndex = storedSeqKeys.length + 3;
-    
-    if (parts.length < expectedPartIndex) {
-      // Show the question for nextKey (we are waiting for it)
-      return screenForKey(nextKey);
-    }
+if (seqAnswersInParts <= storedSeqKeys.length) {
+  // Haven't received the answer for nextKey yet — show the question
+  return screenForKey(nextKey);
+}
 
-    // We have a new answer (the last part)
-    const answerValue = parts[parts.length - 1];
-    const mapped = mapAnswer(nextKey, answerValue);
-    
-    if (mapped === undefined) {
-      return S.invalid();
-    }
-    
+const answerValue = parts[storedSeqKeys.length + 2]; // precise index
+    const map = {
+      land: LAND_MAP, coop: COOP_MAP, herd: HERD_MAP, milkcoop: COOP_MAP,
+      combined: COMBINED_MAP, loan: LOAN_MAP, group: GROUP_MAP,
+      mpesa: MPESA_MAP, gender: GENDER_MAP,
+    };
+    const mapped = map[nextKey] ? map[nextKey][answerValue] : undefined;
+    if (mapped === undefined) return S.invalid();
     answers[nextKey] = mapped;
     await saveSession(sessionId, session);
 
-    // After storing, check if we just collected the last sequence key
     const newStoredLen = seq.filter(k => answers.hasOwnProperty(k)).length;
     
     if (newStoredLen === seq.length) {
-      // All sequence answers collected – show confirm screen
       return S.confirm(answers);
     }
-    
-    // Otherwise, show the next question
-    const nextQuestionKey = seq.find(k => !answers.hasOwnProperty(k));
-
-return screenForKey(nextQuestionKey);
+    return screenForKey(seq[newStoredLen]);
   }
 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════

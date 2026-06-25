@@ -72,7 +72,7 @@ const W = {
 
   // Farm size — proxy for income potential (crop farmers)
   land: {
-    under1:   20,
+    under1:    20,
     one_three: 50,
     three_ten: 80,
     over10:   100,
@@ -80,17 +80,17 @@ const W = {
 
   // Dairy herd size — proxy for milk income
   herd: {
-    '1-2':   20,
-    '3-5':   50,
-    '6-10':  80,
+    '1-2':    20,
+    '3-5':    50,
+    '6-10':   80,
     'over10': 100,
   },
 
   // Combined farm + livestock (mixed farmers)
   combined: {
-    small_farm_few:         { land: 'under1',   herd: '1-2'   },
-    medium_farm_moderate:   { land: 'one_three', herd: '3-5'   },
-    large_farm_many:        { land: 'three_ten', herd: '6-10'  },
+    small_farm_few:         { land: 'under1',    herd: '1-2'    },
+    medium_farm_moderate:   { land: 'one_three', herd: '3-5'    },
+    large_farm_many:        { land: 'three_ten', herd: '6-10'   },
     very_large_farm_many:   { land: 'over10',    herd: 'over10' },
   },
 
@@ -133,23 +133,20 @@ function score(answers) {
 
   // ── Cooperative / Milk cooperative ────────────────────────────────────────
   if (crop === 'dairy') {
-    // Use milkcoop signal
     const milkcoopVal = answers.milkcoop || 'none';
     const coopPts = W.milkcoop[milkcoopVal] ?? 0;
     total += coopPts;
     breakdown.push({ signal: 'Milk cooperative membership', value: milkcoopVal, pts: coopPts });
-    if (milkcoopVal === 'none')     gaps.push({ gap: GAPS.NO_MILKCOOP, impact: 140 });
+    if (milkcoopVal === 'none')     gaps.push({ gap: GAPS.NO_MILKCOOP,   impact: 140 });
     if (milkcoopVal === 'inactive') gaps.push({ gap: GAPS.INACTIVE_COOP, impact: 110 });
   } else if (crop === 'mixed') {
-    // Mixed farmers skip coop (we don't ask) — score as none
     breakdown.push({ signal: 'Cooperative membership', value: 'none', pts: 0 });
   } else {
-    // Maize, beans, horticulture — use general coop
     const coopVal = answers.coop || 'none';
     const coopPts = W.coop[coopVal] ?? 0;
     total += coopPts;
     breakdown.push({ signal: 'Cooperative membership', value: coopVal, pts: coopPts });
-    if (coopVal === 'none')     gaps.push({ gap: GAPS.NO_COOP,      impact: 140 });
+    if (coopVal === 'none')     gaps.push({ gap: GAPS.NO_COOP,       impact: 140 });
     if (coopVal === 'inactive') gaps.push({ gap: GAPS.INACTIVE_COOP, impact: 110 });
   }
 
@@ -169,7 +166,7 @@ function score(answers) {
 
   // ── Farm / Herd / Combined signal ─────────────────────────────────────────
   if (crop === 'dairy') {
-    const herdVal = answers.herd || '1-2';   // default tiny herd if missing
+    const herdVal = answers.herd || '1-2';
     const herdPts = W.herd[herdVal] ?? 20;
     total += herdPts;
     breakdown.push({ signal: 'Dairy herd size', value: herdVal, pts: herdPts });
@@ -184,10 +181,9 @@ function score(answers) {
       breakdown.push({ signal: 'Farm size (from combined)', value: parts.land, pts: landPts });
       breakdown.push({ signal: 'Livestock (from combined)', value: parts.herd, pts: herdPts });
       if (parts.land === 'under1') gaps.push({ gap: GAPS.SMALL_FARM, impact: 80 });
-      if (parts.herd === '1-2')   gaps.push({ gap: GAPS.SMALL_HERD, impact: 80 });
+      if (parts.herd === '1-2')    gaps.push({ gap: GAPS.SMALL_HERD, impact: 80 });
     }
   } else {
-    // Crop farmers (maize, beans, horticulture)
     const landVal = answers.land || 'under1';
     const landPts = W.land[landVal] ?? 20;
     total += landPts;
@@ -238,32 +234,74 @@ function score(answers) {
 
 function tierMeta(tier) {
   const meta = {
-    1: { sw: 'Kiwango cha Kwanza', en: 'Tier 1',  limit: 'KES 30,000–50,000', weeks: null  },
-    2: { sw: 'Kiwango cha Pili',   en: 'Tier 2',  limit: 'KES 8,000–25,000',  weeks: 8     },
-    3: { sw: 'Kiwango cha Tatu',   en: 'Tier 3',  limit: 'KES 2,000–5,000',   weeks: 12    },
-    4: { sw: 'Kiwango cha Nne',    en: 'Tier 4',  limit: null,                weeks: 16    },
+    1: { sw: 'Kiwango cha Kwanza', en: 'Tier 1',  limit: 'KES 30,000–50,000', weeks: null },
+    2: { sw: 'Kiwango cha Pili',   en: 'Tier 2',  limit: 'KES 8,000–25,000',  weeks: 8    },
+    3: { sw: 'Kiwango cha Tatu',   en: 'Tier 3',  limit: 'KES 2,000–5,000',   weeks: 12   },
+    4: { sw: 'Kiwango cha Nne',    en: 'Tier 4',  limit: null,                weeks: 16   },
   };
   return meta[tier];
 }
 
+// ── Score with Neo4j evidence layer ──────────────────────────────────────────
+
+/**
+ * Runs the base rules score then layers Neo4j evidence on top.
+ *
+ * Returns the full result object with:
+ *   baseScore       — rules-only score
+ *   evidenceProfile — full structured evidence from Neo4j (or null if unavailable)
+ *   score           — final score after evidence adjustment
+ *   tier            — final tier after evidence adjustment
+ *   networkBonus    — kept for backward compatibility (= evidenceProfile.adjustment)
+ *   networkReason   — kept for backward compatibility (= evidenceProfile.signals[0])
+ */
 async function scoreWithNetwork(answers, phoneHash) {
   const base = score(answers);
+
   try {
-    const { getNetworkBonus } = require('../db/neo4j');
-    const network = await getNetworkBonus(phoneHash);
-    if (network.bonus !== 0) {
-      const newScore = Math.max(0, Math.min(1000, base.score + network.bonus));
+    const { getEvidenceProfile } = require('../db/neo4j');
+    const evidenceProfile = await getEvidenceProfile(phoneHash);
+
+    if (evidenceProfile.adjustment !== 0 || evidenceProfile.found) {
+      const newScore = Math.max(0, Math.min(1000, base.score + evidenceProfile.adjustment));
+
       let newTier;
       if (newScore >= 640) newTier = 1;
       else if (newScore >= 420) newTier = 2;
       else if (newScore >= 220) newTier = 3;
       else newTier = 4;
-      return { ...base, score: newScore, tier: newTier, networkBonus: network.bonus, networkReason: network.reason, baseScore: base.score };
+
+      return {
+        ...base,
+        score:          newScore,
+        tier:           newTier,
+        baseScore:      base.score,
+        evidenceProfile,
+        // Backward-compatible fields
+        networkBonus:   evidenceProfile.adjustment,
+        networkReason:  evidenceProfile.signals.length > 0 ? evidenceProfile.signals[0] : null,
+      };
     }
+
+    // Neo4j found nothing — return base score with empty evidence attached
+    return {
+      ...base,
+      baseScore:      base.score,
+      evidenceProfile,
+      networkBonus:   0,
+      networkReason:  null,
+    };
+
   } catch (err) {
     console.warn('Network scoring skipped:', err.message);
+    return {
+      ...base,
+      baseScore:      base.score,
+      evidenceProfile: null,
+      networkBonus:   0,
+      networkReason:  null,
+    };
   }
-  return { ...base, networkBonus: 0, networkReason: null, baseScore: base.score };
 }
 
 module.exports = { score, scoreWithNetwork, tierMeta, GAPS };
