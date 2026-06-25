@@ -341,7 +341,7 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
       tier: null,
       crop: answers.cropType,
       land: answers.farmSize,
-      gender: null, // no longer collected; you can add if needed
+      gender: answers.gender, // no longer collected; you can add if needed
       location: answers.location,
     }).catch(err => console.warn('Neo4j write failed:', err.message));
 
