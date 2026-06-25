@@ -15,6 +15,7 @@
  *
  *  2. USSD detail — shown when she dials back and enters her PIN
  *     - Slightly more detail: tier, two actions, timeline
+ *     - Includes graph evidence note when Neo4j found relationships
  *     - Still no score number, no factor weights
  *     - Framed as a path forward, not a judgment
  *
@@ -30,9 +31,6 @@ const { GAPS, tierMeta } = require('./scorer');
 
 // ── Action templates ──────────────────────────────────────────────────────────
 // Each gap maps to one primary action.
-// action: what to do (imperative, short)
-// outcome: what it unlocks (concrete, specific)
-// weeks: roughly how long before she should check again
 
 const ACTIONS = {
   [GAPS.NO_LOAN_HISTORY]: {
@@ -96,7 +94,6 @@ const FALLBACK_ACTION = {
 };
 
 // ── Tier opening lines ────────────────────────────────────────────────────────
-// These frame the decision without rejection language.
 
 const TIER_LINES = {
   1: {
@@ -117,6 +114,58 @@ const TIER_LINES = {
   },
 };
 
+// ── Evidence note builder ─────────────────────────────────────────────────────
+
+/**
+ * Builds a short plain-text note describing what Neo4j found.
+ * Used in buildUSSDDetail() when evidenceProfile is present.
+ *
+ * This is the "why Neo4j" moment made visible to the farmer.
+ * Language: reassuring, not technical. She sees evidence that
+ * her community was considered, not that an algorithm ran.
+ *
+ * Returns null if no evidence was found (don't show the section at all).
+ */
+function buildEvidenceNote(evidenceProfile) {
+  if (!evidenceProfile || !evidenceProfile.found) return null;
+
+  const lines = [];
+
+  if (evidenceProfile.coopName && evidenceProfile.coopRepayRate !== null) {
+    const rate = evidenceProfile.coopRepayRate;
+    if (rate >= 85) {
+      lines.push(
+        `Ushirika wako (${evidenceProfile.coopName}) una historia nzuri.`
+      );
+      lines.push(`(Your cooperative has a strong repayment record.)`);
+    } else if (rate >= 60) {
+      lines.push(`Ushirika wako (${evidenceProfile.coopName}) uliangaliwa.`);
+      lines.push(`(Your cooperative network was reviewed.)`);
+    }
+  }
+
+  if (evidenceProfile.goodNeighbors >= 2) {
+    lines.push(
+      `Wanachama ${evidenceProfile.goodNeighbors} wa ushirika wako wana rekodi nzuri.`
+    );
+    lines.push(`(${evidenceProfile.goodNeighbors} members in your network have clean records.)`);
+  }
+
+  if (evidenceProfile.secondDegreeLinks >= 3) {
+    lines.push(`Mtandao wako wa pili pia ulichangia tathmini yako.`);
+    lines.push(`(Wider community connections also supported your assessment.)`);
+  }
+
+  if (evidenceProfile.guarantors >= 1) {
+    lines.push(`Mdhamini wako wa vikundi alionekana.`);
+    lines.push(`(Your peer guarantor's record was counted.)`);
+  }
+
+  if (lines.length === 0) return null;
+
+  return lines.join('\n');
+}
+
 // ── SMS builder (≤182 chars) ──────────────────────────────────────────────────
 
 function buildSMS(scoreResult) {
@@ -126,7 +175,7 @@ function buildSMS(scoreResult) {
   const action = topGap ? ACTIONS[topGap.gap] : FALLBACK_ACTION;
   const weeks  = action.weeks;
 
-  // Tier 1 — approved, no next-step needed, just confirm and link
+  // Tier 1 — approved, no next-step needed
   if (tier === 1) {
     const msg =
       `FarmCredit: ${TIER_LINES[1].sw} ` +
@@ -146,7 +195,7 @@ function buildSMS(scoreResult) {
   return truncate(msg, 182);
 }
 
-// ── English SMS (for bilingual delivery or lender copy) ──────────────────────
+// ── English SMS ───────────────────────────────────────────────────────────────
 
 function buildSMS_EN(scoreResult) {
   const { tier, gaps } = scoreResult;
@@ -174,10 +223,9 @@ function buildSMS_EN(scoreResult) {
 }
 
 // ── USSD detail text (shown after PIN) ───────────────────────────────────────
-// USSD screens: max ~160 chars per screen, plain text only
 
 function buildUSSDDetail(scoreResult) {
-  const { tier, gaps, ptsToNextTier } = scoreResult;
+  const { tier, gaps, ptsToNextTier, evidenceProfile } = scoreResult;
   const meta    = tierMeta(tier);
   const topGap  = gaps[0];
   const nextGap = gaps[1];
@@ -210,12 +258,19 @@ function buildUSSDDetail(scoreResult) {
     lines.push(`(Return in ${action1.weeks} weeks.)`);
   }
 
+  // ── Evidence note (only when Neo4j found something) ──────────────────────
+  const evidenceNote = buildEvidenceNote(evidenceProfile);
+  if (evidenceNote) {
+    lines.push(``);
+    lines.push(`Jamii yako ilisaidia:`);
+    lines.push(`(Your community supported this assessment:)`);
+    lines.push(evidenceNote);
+  }
+
   return lines.join('\n');
 }
 
 // ── Repayment connection message ──────────────────────────────────────────────
-// Shown as the final screen before session ends.
-// Explains HOW repayment connects to future credit — not pressure, just clarity.
 
 function buildRepaymentLink(tier) {
   if (tier === 1) {
@@ -250,4 +305,5 @@ module.exports = {
   buildSMS_EN,
   buildUSSDDetail,
   buildRepaymentLink,
+  buildEvidenceNote,
 };

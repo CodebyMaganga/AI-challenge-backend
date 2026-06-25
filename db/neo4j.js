@@ -12,13 +12,27 @@
  *   Cypher query. In MongoDB it would require multiple lookups and
  *   manual aggregation.
  *
- * Network score boost (0–120 pts) added on top of base USSD score:
- *   +80  cooperative repayment rate > 85%
- *   +40  at least 2 neighbors (same coop) with full repayment
- *   +30  has an active peer guarantor
- *   -40  cooperative repayment rate < 60% (red flag)
+ *   Second-degree discovery: a farmer may have NO direct coop record
+ *   but sell to an aggregator who buys from 40 reliable farmers. Neo4j
+ *   traverses that path in one query. MongoDB cannot.
  *
- * Falls back gracefully to 0 bonus if Neo4j is not configured.
+ * Evidence profile structure:
+ *   {
+ *     found: boolean,           // did Neo4j find any relationships?
+ *     coopRepayRate: number|null,
+ *     coopSize: number|null,
+ *     coopName: string|null,
+ *     goodNeighbors: number,    // same-coop farmers with clean repayment
+ *     guarantors: number,
+ *     secondDegreeLinks: number, // farmers connected via shared aggregator/lender
+ *     adjustment: number,        // net score adjustment (-40 to +120)
+ *     signals: string[],         // human-readable list of what was found
+ *   }
+ *
+ * getNetworkBonus() is kept for backward compatibility — it now wraps
+ * getEvidenceProfile() and returns the same { bonus, reason } shape.
+ *
+ * Falls back gracefully to empty evidence if Neo4j is not configured.
  */
 
 const neo4j = require('neo4j-driver');
@@ -125,28 +139,42 @@ async function writeFarmerNode({ phoneHash, tier, crop, land, coopName, hadLoan,
   }
 }
 
-// ── Network score boost ───────────────────────────────────────────────────────
+// ── Evidence profile ──────────────────────────────────────────────────────────
 
 /**
- * Look up the farmer's cooperative network and compute a bonus score.
- * Returns an object: { bonus: number, reason: string|null }
+ * Discover all relationship evidence for a farmer in the graph.
  *
- * Bonus breakdown (max 120 pts):
- *   +80   coop repayment rate >= 85%
- *   +40   2+ coop neighbors fully repaid
- *   +30   active guarantor linked
- *   -40   coop repayment rate < 60%
+ * This is the core Neo4j value: we look for evidence before assuming
+ * a farmer has none. Three layers of discovery:
+ *
+ *   Layer 1 — Direct cooperative membership & repayment rate
+ *   Layer 2 — Same-coop neighbors with clean repayment history
+ *   Layer 3 — Second-degree links (shared aggregator / lender network)
+ *             This is what MongoDB cannot easily do — we traverse two hops.
+ *
+ * Returns a structured evidence object. Never throws — falls back to
+ * empty evidence so scoring always completes.
  */
-async function getNetworkBonus(phoneHash) {
-  const result = { bonus: 0, reason: null };
+async function getEvidenceProfile(phoneHash) {
+  const evidence = {
+    found:             false,
+    coopRepayRate:     null,
+    coopSize:          null,
+    coopName:          null,
+    goodNeighbors:     0,
+    guarantors:        0,
+    secondDegreeLinks: 0,
+    adjustment:        0,
+    signals:           [],
+  };
 
-  // ── Cooperative repayment rate ────────────────────────────────────────────
+  // ── Layer 1: Cooperative repayment rate ──────────────────────────────────
   const coopRows = await query(
     `MATCH (f:Farmer {phoneHash: $phoneHash})-[:MEMBER_OF]->(c:Cooperative)
      OPTIONAL MATCH (c)<-[:MEMBER_OF]-(member:Farmer)-[loan:BORROWED_FROM]->()
      WITH c,
-          count(loan)                          AS totalLoans,
-          sum(CASE WHEN loan.repaid THEN 1 ELSE 0 END) AS repaidLoans
+          count(loan)                                          AS totalLoans,
+          sum(CASE WHEN loan.repaid THEN 1 ELSE 0 END)        AS repaidLoans
      WHERE totalLoans > 0
      RETURN c.name AS coopName,
             round(toFloat(repaidLoans) / totalLoans * 100, 1) AS repayRate,
@@ -155,19 +183,35 @@ async function getNetworkBonus(phoneHash) {
   );
 
   if (coopRows.length > 0) {
-    const rate = coopRows[0].repayRate;
-    const total = coopRows[0].totalLoans;
+    const rate  = coopRows[0].repayRate;
+    const total = neo4j.integer.isInteger(coopRows[0].totalLoans)
+      ? neo4j.integer.toNumber(coopRows[0].totalLoans)
+      : coopRows[0].totalLoans;
+
+    evidence.found         = true;
+    evidence.coopRepayRate = rate;
+    evidence.coopSize      = total;
+    evidence.coopName      = coopRows[0].coopName;
 
     if (rate >= 85 && total >= 5) {
-      result.bonus += 80;
-      result.reason = `Cooperative repayment rate: ${rate}% across ${total} members`;
+      evidence.adjustment += 80;
+      evidence.signals.push(
+        `Member of ${evidence.coopName} — ${rate}% repayment rate across ${total} members`
+      );
     } else if (rate < 60 && total >= 5) {
-      result.bonus -= 40;
-      result.reason = `Cooperative repayment concern: ${rate}% rate`;
+      evidence.adjustment -= 40;
+      evidence.signals.push(
+        `Cooperative repayment concern: ${rate}% rate at ${evidence.coopName}`
+      );
+    } else if (total >= 5) {
+      // Moderate rate — still evidence, no score change
+      evidence.signals.push(
+        `Member of ${evidence.coopName} — ${rate}% repayment rate (${total} members)`
+      );
     }
   }
 
-  // ── Neighbor repayment (same coop, repaid fully) ──────────────────────────
+  // ── Layer 2: Same-coop neighbors with clean repayment ────────────────────
   const neighborRows = await query(
     `MATCH (f:Farmer {phoneHash: $phoneHash})-[:MEMBER_OF]->(c:Cooperative)
      MATCH (neighbor:Farmer)-[:MEMBER_OF]->(c)
@@ -179,11 +223,58 @@ async function getNetworkBonus(phoneHash) {
   );
 
   if (neighborRows.length > 0) {
-    const neighbors = neo4j.integer.toNumber(neighborRows[0].goodNeighbors || 0);
+    const neighbors = neo4j.integer.isInteger(neighborRows[0].goodNeighbors)
+      ? neo4j.integer.toNumber(neighborRows[0].goodNeighbors)
+      : (neighborRows[0].goodNeighbors || 0);
+
+    evidence.goodNeighbors = neighbors;
+
     if (neighbors >= 2) {
-      result.bonus += 40;
-      result.reason = (result.reason ? result.reason + '; ' : '') +
-        `${neighbors} cooperative neighbors with clean repayment`;
+      evidence.found = true;
+      evidence.adjustment += 40;
+      evidence.signals.push(
+        `${neighbors} cooperative neighbors with verified clean repayment`
+      );
+    }
+  }
+
+  // ── Layer 3: Second-degree links via shared aggregator/lender ────────────
+  // This is the key Neo4j differentiator: two-hop traversal.
+  // Farmer → MEMBER_OF → Cooperative ← MEMBER_OF ← OtherFarmer → BORROWED_FROM → Lender
+  // We find farmers who share a lender with this farmer's cooperative members,
+  // and count how many of those second-degree connections have repaid.
+  //
+  // For thin-file farmers with NO direct coop record, this can still find
+  // evidence through a shared aggregator or micro-lender network.
+  const secondDegreeRows = await query(
+    `MATCH (f:Farmer {phoneHash: $phoneHash})
+     OPTIONAL MATCH (f)-[:MEMBER_OF]->(c:Cooperative)<-[:MEMBER_OF]-(neighbor:Farmer)
+     WHERE neighbor.phoneHash <> $phoneHash
+     WITH f, collect(DISTINCT neighbor) AS coopNeighbors
+     UNWIND CASE WHEN size(coopNeighbors) > 0 THEN coopNeighbors ELSE [f] END AS pivot
+     MATCH (pivot)-[:BORROWED_FROM]->(l:Lender)<-[:BORROWED_FROM]-(linked:Farmer)
+     WHERE linked.phoneHash <> $phoneHash
+       AND NOT linked IN coopNeighbors
+     MATCH (linked)-[loan:BORROWED_FROM]->()
+     WHERE loan.repaid = true
+     RETURN count(DISTINCT linked) AS secondDegree`,
+    { phoneHash }
+  );
+
+  if (secondDegreeRows.length > 0) {
+    const sd = neo4j.integer.isInteger(secondDegreeRows[0].secondDegree)
+      ? neo4j.integer.toNumber(secondDegreeRows[0].secondDegree)
+      : (secondDegreeRows[0].secondDegree || 0);
+
+    evidence.secondDegreeLinks = sd;
+
+    if (sd >= 3) {
+      evidence.found = true;
+      // Second-degree gives a smaller boost — it's weaker signal
+      evidence.adjustment += 15;
+      evidence.signals.push(
+        `${sd} second-degree connections with clean repayment history in shared network`
+      );
     }
   }
 
@@ -197,20 +288,47 @@ async function getNetworkBonus(phoneHash) {
   );
 
   if (guarantorRows.length > 0) {
-    const guarantors = neo4j.integer.toNumber(guarantorRows[0].guarantors || 0);
+    const guarantors = neo4j.integer.isInteger(guarantorRows[0].guarantors)
+      ? neo4j.integer.toNumber(guarantorRows[0].guarantors)
+      : (guarantorRows[0].guarantors || 0);
+
+    evidence.guarantors = guarantors;
+
     if (guarantors >= 1) {
-      result.bonus += 30;
-      result.reason = (result.reason ? result.reason + '; ' : '') +
-        `Active peer guarantor with clean history`;
+      evidence.found = true;
+      evidence.adjustment += 30;
+      evidence.signals.push(
+        `${guarantors} active peer guarantor(s) with verified repayment history`
+      );
     }
   }
 
-  result.bonus = Math.max(-40, Math.min(120, result.bonus));
-  return result;
+  // Clamp adjustment
+  evidence.adjustment = Math.max(-40, Math.min(120, evidence.adjustment));
+
+  return evidence;
+}
+
+// ── Network bonus (backward-compatible wrapper) ───────────────────────────────
+
+/**
+ * Kept for backward compatibility. Wraps getEvidenceProfile() and returns
+ * the original { bonus, reason } shape so existing callers don't break.
+ */
+async function getNetworkBonus(phoneHash) {
+  try {
+    const evidence = await getEvidenceProfile(phoneHash);
+    return {
+      bonus:  evidence.adjustment,
+      reason: evidence.signals.length > 0 ? evidence.signals[0] : null,
+    };
+  } catch (err) {
+    console.warn('getNetworkBonus fallback:', err.message);
+    return { bonus: 0, reason: null };
+  }
 }
 
 // ── Seed demo cooperative data ────────────────────────────────────────────────
-// Run once to create a realistic cooperative network for demos
 
 async function seedDemoCooperative() {
   const d = getDriver();
@@ -220,7 +338,7 @@ async function seedDemoCooperative() {
   await query(`MERGE (c:Cooperative {name: 'Siaya Dairy Coop'}) SET c.region = 'Siaya'`);
 
   for (let i = 1; i <= 10; i++) {
-    const hash = `demo_member_${i}`;
+    const hash   = `demo_member_${i}`;
     const repaid = i <= 9; // 90% repayment rate
     await query(
       `MERGE (f:Farmer {phoneHash: $hash})
@@ -234,13 +352,29 @@ async function seedDemoCooperative() {
     );
   }
 
+  // Seed a second lender network for second-degree discovery demo
+  await query(`MERGE (l:Lender {name: 'kilimo_microfinance'}) SET l.region = 'Siaya'`);
+  for (let i = 1; i <= 5; i++) {
+    const hash = `kilimo_borrower_${i}`;
+    await query(
+      `MERGE (f:Farmer {phoneHash: $hash})
+       SET f.crop = 'maize', f.tier = 1
+       MERGE (l:Lender {name: 'kilimo_microfinance'})
+       MERGE (f)-[r:BORROWED_FROM]->(l)
+       SET r.repaid = true`,
+      { hash }
+    );
+  }
+
   console.log('✅ Demo cooperative seeded: Siaya Dairy Coop (90% repayment, 10 members)');
+  console.log('✅ Second-degree network seeded: Kilimo Microfinance (5 clean borrowers)');
 }
 
 module.exports = {
   query,
   initSchema,
   writeFarmerNode,
+  getEvidenceProfile,
   getNetworkBonus,
   seedDemoCooperative,
   getDriver,
