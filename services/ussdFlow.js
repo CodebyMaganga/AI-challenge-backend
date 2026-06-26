@@ -385,12 +385,17 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         if (!/^\d{4}$/.test(parts[1])) {
           return `CON PIN lazima iwe namba 4.\nJaribu tena:`;
         }
-        await saveSession(sessionId, { candidatePIN: parts[1] });
+        const existingSession = await getSession(sessionId);
+
+        await saveSession(sessionId, {
+          ...existingSession,
+          candidatePIN: parts[1]
+        });
         return S.confirmPIN();
       }
       if (fd === 2) {
         const sess = await getSession(sessionId);
-        if (parts[2] !== sess?.candidatePIN) {
+        if (!sess || parts[2].trim() !== sess.candidatePIN.trim()) {
           await deleteSession(sessionId);
           return S.pinMismatch();
         }
