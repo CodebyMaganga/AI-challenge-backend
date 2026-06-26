@@ -7,6 +7,8 @@ const { initSchema } = require('./db/neo4j');
 const app  = express();
 const PORT = process.env.PORT || 3000;
 
+const dashboardRoutes = require('./routes/dashboard');
+
 // ── Ngrok browser warning bypass ──────────────────────────────────────────────
 app.use((req, res, next) => {
   res.setHeader('ngrok-skip-browser-warning', 'true');
@@ -15,6 +17,8 @@ app.use((req, res, next) => {
 
 app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
+
+app.use('/dashboard', dashboardRoutes);
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));
