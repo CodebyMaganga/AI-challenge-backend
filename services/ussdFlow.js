@@ -84,6 +84,7 @@ const { writeFarmerNode, writeEvidenceGraph } = require('../db/neo4j');
 const { hashPhone } = require('../db/sessionStore');
 const { sendSMS } = require('./smsService');
 const { initiateRiskAssessment } = require('./riskEngine');
+const { saveFarmerAssessment } = require('../db/farmerStore');
 
 // ═══════════════════════════════════════════════════════════════════════════════
 // ADAPTIVE SEQUENCE ENGINE
@@ -625,6 +626,10 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
         lastSequence: sequence,
         adaptiveBranches: applicationData.adaptiveBranches,
       });
+
+            saveFarmerAssessment(hashPhone(phoneNumber), answers, result)
+        .catch(err => console.error('farmerStore save failed:', err.message));
+
 
       // Send SMS (non-blocking)
       const smsText = buildSMS(result);
