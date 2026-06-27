@@ -413,7 +413,22 @@ const CONFIRM_LABELS = {
   location:        v => `Kaunti: ${v}`,
   farmAccess:      v => ({ owned: 'Shamba langu', family: 'Familia', leased: 'Napangisha', shared: 'Kushiriki' }[v] || v),
   leaseLength:     v => ({ short: 'Panga: <1yr', medium: 'Panga: 1-3yr', long: 'Panga: 3yr+' }[v] || v),
-  cropType:        v => ({ crops: 'Mazao', dairy: 'Ng\'ombe', horticulture: 'Mboga', mixed: 'Mchanganyiko' }[v] || v),
+  cropType: v => {
+
+  if (!v) return 'Mazao: Haijawekwa';
+
+  if (typeof v === 'object') {
+    return `Mazao: ${v.crops.join(', ')}`;
+  }
+
+  return ({
+    crops: 'Mazao',
+    dairy: 'Ng\'ombe',
+    horticulture:'Mboga',
+    mixed:'Mchanganyiko'
+  }[v] || v);
+
+},
   herdSize:        v => `Ng'ombe: ${v}`,
   milkCooperative: v => ({ monthly: 'Ushirika: kila mwezi', occasional: 'Ushirika: wakati mwingine', none: 'Ushirika: hapana' }[v] || v),
   farmSeason:      v => ({ long_rains: 'Masika', short_rains: 'Vuli', year_round: 'Mwaka mzima' }[v] || v),
@@ -497,9 +512,9 @@ function buildEvidenceGraphPayload(answers, phoneHash, sequence) {
 
   // Crop / livestock activity node
   const cropProps = {
- cropCategory: answers.cropType.category,
- crops: answers.cropType.crops,
- evidenceRole:'INCOME_SIGNAL'
+  cropCategory: answers.cropType.category,
+  crops: answers.cropType.crops,
+  evidenceRole:'INCOME_SIGNAL'
 };
   if (answers.cropType === 'dairy') {
     cropProps.herdSize = answers.herdSize;
