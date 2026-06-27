@@ -33,6 +33,7 @@ const {
 const chamas = require('../db/chamaRegistry');
 const Farmer = require('../db/farmerModel');
 const { rescoreFarmer } = require('../services/rescoreService');
+const { buildSMS } = require('../services/explainer'); 
 
 // ── Upload middleware setup (multer) ──────────────────────────────────────────
 let upload;
@@ -317,6 +318,34 @@ router.post('/upload', (req, res) => {
       url:      `/uploads/${req.file.filename}`,
     });
   });
+});
+
+
+router.get('/farmers/:phoneHash/sms-preview', async (req, res) => {
+  try {
+    const farmer = await getFarmerDetail(req.params.phoneHash);
+    if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
+
+    const latest = farmer.assessmentHistory?.[0];
+    if (!latest) return res.status(400).json({ error: 'No assessment to build SMS from' });
+
+    // Build the score result object as expected by buildSMS
+    const scoreResult = {
+      tier: latest.tier,
+      gaps: latest.gaps?.map(gap => ({ gap })) || [],   // convert strings back to { gap }
+      ptsToNextTier: latest.ptsToNextTier,
+      evidenceProfile: {
+        found: latest.evidence?.networkFound || false,
+        // You can add more fields if needed (coopName, etc.)
+      },
+    };
+
+    const smsText = buildSMS(scoreResult);
+    res.json({ sms: smsText });
+  } catch (err) {
+    console.error('SMS preview error:', err);
+    res.status(500).json({ error: 'Failed to generate SMS' });
+  }
 });
 
 module.exports = router;
