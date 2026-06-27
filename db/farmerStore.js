@@ -142,7 +142,8 @@ async function listFarmers({
   if (location)      filter.location      = location;
   if (tier)          filter.currentTier   = Number(tier);
   if (communityTies) filter.communityTies = communityTies;
-  if (cropType)      filter.cropType      = cropType;
+  if(cropType)
+ filter["cropType.crops"] = cropType;
 
   if (dateFrom || dateTo) {
     filter.lastScoredAt = {};
@@ -210,7 +211,13 @@ async function getDashboardStats({ location, dateFrom, dateTo } = {}) {
     // Crop type distribution
     Farmer.aggregate([
       { $match: matchStage },
-      { $group: { _id: '$cropType', count: { $sum: 1 } } },
+      { $unwind: "$cropType.crops" },
+      {$group:{
+ _id:"$cropType.crops",
+ count:{
+   $sum:1
+ }
+}},
       { $sort: { count: -1 } },
     ]),
 
@@ -270,7 +277,8 @@ async function exportFarmers({ location, tier, communityTies, cropType } = {}) {
   if (location)      filter.location      = location;
   if (tier)          filter.currentTier   = Number(tier);
   if (communityTies) filter.communityTies = communityTies;
-  if (cropType)      filter.cropType      = cropType;
+  if(cropType)
+ filter["cropType.crops"] = cropType;
 
   const farmers = await Farmer.find(filter)
     .select('phoneHash location cropType farmAccess communityTies currentTier currentScore currentTopReason lastScoredAt assessmentCount')

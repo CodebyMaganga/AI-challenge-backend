@@ -28,7 +28,12 @@ const assessmentSchema = new mongoose.Schema({
   answers: {
     farmAccess:      String,
     leaseLength:     String,
-    cropType:        String,
+
+  cropType:{
+    category:String,
+    crops:[String]
+  },
+
     herdSize:        String,
     milkCooperative: String,
     farmSeason:      String,
@@ -61,7 +66,16 @@ const assessmentSchema = new mongoose.Schema({
 const farmerSchema = new mongoose.Schema({
   phoneHash:  { type: String, required: true, unique: true, index: true },
   location:   { type: String, index: true },
-  cropType:   { type: String, index: true },
+  cropType: {
+  category: {
+    type: String,
+    index: true,
+  },
+
+  crops: [{
+    type: String
+  }]
+},
   farmAccess: String,
 
   // Current (latest) assessment — denormalised for fast dashboard queries
