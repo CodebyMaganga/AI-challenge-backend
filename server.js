@@ -2,9 +2,16 @@ require('dotenv').config();
 const express    = require('express');
 const bodyParser = require('body-parser');
 const mongoose   = require('mongoose');
+const cors = require("cors");
 
 const { initSchema } = require('./db/neo4j');
 const app  = express();
+app.use(
+ cors({
+   origin: process.env.FRONTEND_URL,
+   credentials:true
+ })
+);
 const PORT = process.env.PORT || 3000;
 
 const dashboardRoutes = require('./routes/dashboard');
