@@ -344,12 +344,24 @@ const ANSWER_MAPS = {
     '3': 'long',    // 3+ years — near-ownership stability
   },
 
-  cropType: {
-    '1': 'crops',     // maize/beans
-    '2': 'dairy',     // livestock — triggers adaptive branch
-    '3': 'horticulture',
-    '4': 'mixed',
-  },
+  cropType:{
+ '1': {
+   category:'crops',
+   crops:['maize','beans']
+ },
+ '2': {
+   category:'dairy',
+   crops:['milk']
+ },
+ '3':{
+   category:'horticulture',
+   crops:['vegetables','fruits']
+ },
+ '4':{
+   category:'mixed',
+   crops:['mixed']
+ }
+},
 
   herdSize: {
     '1': 'small',   // 1-2 animals
@@ -427,10 +439,16 @@ function screenForKey(key) {
   return fn ? fn() : S.invalid();
 }
 
-function mapAnswer(key, rawValue) {
-  const map = ANSWER_MAPS[key];
-  if (!map) return rawValue;
-  return map[rawValue] !== undefined ? map[rawValue] : rawValue;
+function mapAnswer(key, rawValue){
+
+ const map = ANSWER_MAPS[key];
+
+ if(!map) return rawValue;
+
+ return map[rawValue] !== undefined
+ ? map[rawValue]
+ : rawValue;
+
 }
 
 // ═══════════════════════════════════════════════════════════════════════════════
@@ -479,9 +497,10 @@ function buildEvidenceGraphPayload(answers, phoneHash, sequence) {
 
   // Crop / livestock activity node
   const cropProps = {
-    cropType: answers.cropType,
-    evidenceRole: 'INCOME_SIGNAL',
-  };
+ cropCategory: answers.cropType.category,
+ crops: answers.cropType.crops,
+ evidenceRole:'INCOME_SIGNAL'
+};
   if (answers.cropType === 'dairy') {
     cropProps.herdSize = answers.herdSize;
     cropProps.milkCooperative = answers.milkCooperative;
