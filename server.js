@@ -26,6 +26,8 @@ app.use(bodyParser.urlencoded({ extended: false }));
 app.use(bodyParser.json());
 
 app.use('/dashboard', dashboardRoutes);
+// Serve uploaded evidence files
+app.use('/uploads', express.static(require('path').join(__dirname, 'uploads')));
 
 // ── Health check ──────────────────────────────────────────────────────────────
 app.get('/health', (req, res) => res.json({ status: 'ok', ts: new Date() }));
