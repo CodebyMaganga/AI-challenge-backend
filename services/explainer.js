@@ -171,8 +171,11 @@ function buildEvidenceNote(evidenceProfile) {
 function buildSMS(scoreResult) {
   const { tier, gaps } = scoreResult;
   const meta   = tierMeta(tier);
-  const topGap = gaps[0];
-  const action = topGap ? ACTIONS[topGap.gap] : FALLBACK_ACTION;
+  const topGap = gaps?.[0];
+  const action =
+  topGap && ACTIONS[topGap.gap]
+    ? ACTIONS[topGap.gap]
+    : FALLBACK_ACTION;
   const weeks  = action.weeks;
 
   // Tier 1 — approved, no next-step needed
@@ -200,8 +203,13 @@ function buildSMS(scoreResult) {
 function buildSMS_EN(scoreResult) {
   const { tier, gaps } = scoreResult;
   const meta   = tierMeta(tier);
-  const topGap = gaps[0];
-  const action = topGap ? ACTIONS[topGap.gap] : FALLBACK_ACTION;
+  const topGap = gaps?.[0];
+  const action =
+  topGap && ACTIONS[topGap.gap]
+    ? ACTIONS[topGap.gap]
+    : FALLBACK_ACTION;
+
+const weeks = action.weeks;
 
   if (tier === 1) {
     return truncate(
@@ -217,7 +225,7 @@ function buildSMS_EN(scoreResult) {
     `FarmCredit: ${TIER_LINES[tier].en} ` +
     `One step: ${action.action_en}. ` +
     `This unlocks ${action.outcome_en}. ` +
-    `Check back in ${action.weeks} weeks. Dial *384#.`,
+    `Check back in ${weeks} weeks. Dial *384#.`,
     182
   );
 }
@@ -229,8 +237,15 @@ function buildUSSDDetail(scoreResult) {
   const meta    = tierMeta(tier);
   const topGap  = gaps[0];
   const nextGap = gaps[1];
-  const action1 = topGap  ? ACTIONS[topGap.gap]  : FALLBACK_ACTION;
-  const action2 = nextGap ? ACTIONS[nextGap.gap] : null;
+  const action1 =
+  topGap && ACTIONS[topGap.gap]
+    ? ACTIONS[topGap.gap]
+    : FALLBACK_ACTION;
+
+const action2 =
+  nextGap && ACTIONS[nextGap.gap]
+    ? ACTIONS[nextGap.gap]
+    : null;
 
   const lines = [];
 
