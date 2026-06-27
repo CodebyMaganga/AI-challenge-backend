@@ -90,6 +90,32 @@ const farmerSchema = new mongoose.Schema({
 
   // Full history of all assessments
   assessmentHistory: [assessmentSchema],
+  // Evidence verification — saved by field officer via dashboard
+  evidenceVerification: {
+    mpesaStatement: {
+      uploaded: { type: Boolean, default: false },
+      filename: { type: String, default: null },
+    },
+    chama: {
+      id:       { type: String, default: null },
+      name:     { type: String, default: null },
+      verified: { type: Boolean, default: false },
+    },
+    land: {
+      type:     { type: String, default: null },  // 'Title Deed'|'Lease Agreement'|'Family Land'
+      uploaded: { type: Boolean, default: false },
+      filename: { type: String, default: null },
+    },
+    communityVerification: {
+      chamaMembershipVerified:    { type: Boolean, default: false },
+      cooperativeMemberVerified:  { type: Boolean, default: false },
+      womensGroupLeaderConfirmed: { type: Boolean, default: false },
+    },
+    notes:      { type: String, default: '' },
+    verifiedBy: { type: String, default: null },
+    verifiedAt: { type: Date,   default: null },
+  },
+
 }, {
   timestamps: true,   // createdAt, updatedAt
   collection: 'farmers',
