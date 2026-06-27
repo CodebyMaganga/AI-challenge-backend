@@ -552,15 +552,24 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
 
     // Initialize session on first entry
     if (!session || session.state !== 'assess') {
-      session = { state: 'assess', answers: {} };
+      session = {
+ state:'assess',
+ answers:{},
+ sequence:null
+};
       await saveSession(sessionId, session);
     }
 
     const answers = session.answers;
 
     // Compute adaptive sequence based on current answers
-    const sequence = computeSequence(answers);
+    const sequence = session.sequence || computeSequence(answers);
+    session.sequence = sequence;
+await saveSession(sessionId, session);
     const answeredKeys = sequence.filter(k => answers.hasOwnProperty(k));
+    if (answeredKeys.length === sequence.length) {
+  return;
+}
     const nextKey = sequence[answeredKeys.length];
 
     // ── Show first question ──────────────────────────────────────────────────
@@ -622,7 +631,9 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
     const session = await getSession(sessionId);
     if (session?.state === 'assess') {
       const answers = session.answers;
-      const sequence = computeSequence(answers);
+      const sequence = session.sequence || computeSequence(answers);
+      session.sequence = sequence;
+await saveSession(sessionId, session);
       const answeredKeys = sequence.filter(k => answers.hasOwnProperty(k));
 
       if (answeredKeys.length === sequence.length) {
