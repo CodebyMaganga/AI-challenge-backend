@@ -251,6 +251,45 @@ router.post('/farmers/:phoneHash/evidence', async (req, res) => {
   }
 });
 
+// POST /dashboard/farmers/:phoneHash/simulate-mpesa
+router.post('/farmers/:phoneHash/simulate-mpesa', async (req, res) => {
+  try {
+    const farmer = await getFarmerDetail(req.params.phoneHash);
+    if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
+
+    // Simulate parsing an M‑Pesa statement
+    const weeklyAmount = Math.floor(Math.random() * 800) + 200;
+    const monthlyAmount = Math.floor(Math.random() * 600) + 100;
+    const mpesaScore = Math.floor(Math.random() * 56) + 40; // 40–95
+
+    const latestAssessment = farmer.assessmentHistory?.[0];
+    if (!latestAssessment) return res.status(400).json({ error: 'No assessment to update' });
+
+    latestAssessment.evidence = {
+      ...latestAssessment.evidence,
+      mpesaScore,
+      mpesaWeekly: weeklyAmount,
+      mpesaMonthly: monthlyAmount,
+      mpesaStatementParsed: true,
+    };
+
+    // Mark as uploaded (pretend)
+    if (!farmer.evidenceVerification) farmer.evidenceVerification = {};
+    farmer.evidenceVerification.mpesaStatement = {
+      uploaded: true,
+      filename: 'statement-simulated.pdf', // dummy name
+    };
+
+    await farmer.save();
+    const updatedFarmer = await rescoreFarmer(farmer);
+
+    res.json({ success: true, farmer: updatedFarmer });
+  } catch (err) {
+    console.error('Simulate M-Pesa error:', err);
+    res.status(500).json({ error: err.message || 'Simulation failed' });
+  }
+});
+
 // POST /dashboard/upload
 router.post('/upload', (req, res) => {
   if (!upload) {
