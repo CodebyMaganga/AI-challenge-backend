@@ -547,184 +547,155 @@ async function handleUSSD({ sessionId, phoneNumber, text, networkCode }) {
   }
 
   // ══ FLOW A: New assessment ════════════════════════════════════════════════
-  if (mainChoice === '1') {
-    let session = await getSession(sessionId);
+ if (mainChoice === '1') {
+  let session = await getSession(sessionId);
 
-    // Initialize session on first entry
-    if (!session || session.state !== 'assess') {
-      session = {
- state:'assess',
- answers:{},
- sequence:null
-};
-      await saveSession(sessionId, session);
-    }
-
-    const answers = session.answers;
-
-    // Compute adaptive sequence based on current answers
-    const sequence = session.sequence || computeSequence(answers);
-    session.sequence = sequence;
-await saveSession(sessionId, session);
-    const answeredKeys = sequence.filter(k => answers.hasOwnProperty(k));
-    if (answeredKeys.length === sequence.length) {
-  return;
-}
-    const nextKey = sequence[answeredKeys.length];
-
-    // ── Show first question ──────────────────────────────────────────────────
-    if (parts.length === 1 && answeredKeys.length === 0) {
-      return screenForKey(nextKey);
-    }
-
-    // ── Process incoming answer ──────────────────────────────────────────────
-    // parts = ['1', ans1, ans2, ...]
-    // The answer for the n-th question is at parts[n+1]
-    const answerIndex = answeredKeys.length + 1;
-
-    if (parts.length <= answerIndex) {
-      // Waiting for input — redisplay the current question
-      return screenForKey(nextKey);
-    }
-
-    const rawValue = parts[answerIndex];
-    const mapped = mapAnswer(nextKey, rawValue);
-
-    if (mapped === undefined || mapped === rawValue && !Object.keys(ANSWER_MAPS[nextKey] || {}).length) {
-      // Invalid choice — but don't lose session
-      return S.invalid();
-    }
-
-    // Validate the answer is a known value
-    const validValues = ANSWER_MAPS[nextKey] ? Object.values(ANSWER_MAPS[nextKey]) : null;
-    if (validValues && !validValues.includes(mapped)) {
-      return S.invalid();
-    }
-
-    // Save the answer
-    answers[nextKey] = mapped;
+  // Initialize session on first entry
+  if (!session || session.state !== 'assess') {
+    session = { state: 'assess', answers: {}, sequence: null };
     await saveSession(sessionId, session);
+  }
 
-    // ── Recompute sequence after saving (answers may change branch) ──────────
-    const newSequence = computeSequence(answers);
-    const newAnsweredKeys = newSequence.filter(k => answers.hasOwnProperty(k));
+  const answers = session.answers;
+  const sequence = session.sequence || computeSequence(answers);
+  session.sequence = sequence;
+  await saveSession(sessionId, session);
 
-    // ── All questions answered → show confirm ────────────────────────────────
-    if (newAnsweredKeys.length === newSequence.length) {
-      return S.confirm(answers, newSequence);
+  const answeredKeys = sequence.filter(k => answers.hasOwnProperty(k));
+
+  // ── Confirm‑screen handling ──────────────────────────────────────────────
+  // If all questions are answered and we have an extra input (the confirm choice)
+  if (answeredKeys.length === sequence.length && parts.length === sequence.length + 2) {
+    const lastPart = parts[parts.length - 1];
+
+    if (lastPart === '1') {
+      // ── User confirmed — run evidence discovery + risk assessment ──────
+      const phoneHash = hashPhone(phoneNumber);
+      const graphPayload = buildEvidenceGraphPayload(answers, phoneHash, sequence);
+
+      // Write farmer node + full evidence graph to Neo4j (non-blocking)
+      writeFarmerNode({
+        phoneHash,
+        location: answers.location,
+        crop: answers.cropType,
+        farmAccess: answers.farmAccess,
+      }).catch(err => console.warn('Neo4j farmer node write failed:', err.message));
+
+      writeEvidenceGraph(graphPayload)
+        .catch(err => console.warn('Neo4j evidence graph write failed:', err.message));
+
+      // Build application data for risk engine
+      const applicationData = {
+        phone: phoneNumber,
+        phoneHash,
+        consent: answers.consent,
+        location: answers.location,
+        farmAccess: answers.farmAccess,
+        leaseLength: answers.leaseLength || null,
+        cropType: answers.cropType,
+        herdSize: answers.herdSize || null,
+        milkCooperative: answers.milkCooperative || null,
+        farmSeason: answers.farmSeason || null,
+        communityTies: answers.communityTies,
+        loanHistory: answers.loanHistory || null,
+        inputAccess: answers.inputAccess,
+        questionsAnswered: sequence.length,
+        adaptiveBranches: {
+          wasDairy: answers.cropType === 'dairy',
+          hasGroupFinance: ['chama', 'sacco', 'coop'].includes(answers.communityTies),
+          wasLeased: answers.farmAccess === 'leased',
+          loanHistorySkipped: !sequence.includes('loanHistory'),
+        },
+        evidenceGraph: graphPayload,
+      };
+
+      // Run risk assessment
+      const result = await initiateRiskAssessment(applicationData, phoneHash);
+
+      // Persist farmer record
+      const existing = await getFarmerRecord(phoneNumber);
+      await saveFarmerRecord(phoneNumber, {
+        lastScore: result,
+        lastTier: result.tier,
+        lastScoredAt: result.scoredAt,
+        assessmentCount: (existing?.assessmentCount || 0) + 1,
+        pinSet: existing?.pinSet || false,
+        pin: existing?.pin || null,
+        lastEvidence: result.evidenceProfile || null,
+        lastSequence: sequence,
+        adaptiveBranches: applicationData.adaptiveBranches,
+      });
+
+      // Send SMS (non-blocking)
+      const smsText = buildSMS(result);
+      console.log('📱 SMS CONTENT:', smsText);
+      sendSMS(phoneNumber, smsText).catch(err =>
+        console.error('SMS send failed:', err.message)
+      );
+
+      await deleteSession(sessionId);
+      return S.processing();
     }
 
-    // ── More questions remaining ─────────────────────────────────────────────
-    const nextNextKey = newSequence[newAnsweredKeys.length];
-    return screenForKey(nextNextKey);
-  }
-
-  // ── Handle confirm screen actions (after all questions answered) ────────────
-  if (mainChoice === '1') {
-    // This branch handles the confirm screen choices
-    // (the confirm check above returns early so this handles post-confirm)
-  }
-
-  // Detect if we are in the confirm/post-confirm state for Flow A
-  // We check: mainChoice === '1' AND all questions answered
-  {
-    const session = await getSession(sessionId);
-    if (session?.state === 'assess') {
-      const answers = session.answers;
-      const sequence = session.sequence || computeSequence(answers);
-      session.sequence = sequence;
-await saveSession(sessionId, session);
-      const answeredKeys = sequence.filter(k => answers.hasOwnProperty(k));
-
-      if (answeredKeys.length === sequence.length) {
-        // We are at the confirm screen
-        const lastPart = parts[parts.length - 1];
-
-        if (lastPart === '2') {
-          // Start over
-          await deleteSession(sessionId);
-          return S.main();
-        }
-
-        if (lastPart === '0') {
-          await deleteSession(sessionId);
-          return S.goodbye();
-        }
-
-        if (lastPart !== '1') {
-          return S.invalid();
-        }
-
-        // ── User confirmed — run evidence discovery + risk assessment ─────────
-        const phoneHash = hashPhone(phoneNumber);
-        const graphPayload = buildEvidenceGraphPayload(answers, phoneHash, sequence);
-
-        // Write farmer node + full evidence graph to Neo4j (non-blocking)
-        writeFarmerNode({
-          phoneHash,
-          location: answers.location,
-          crop: answers.cropType,
-          farmAccess: answers.farmAccess,
-        }).catch(err => console.warn('Neo4j farmer node write failed:', err.message));
-
-        writeEvidenceGraph(graphPayload)
-          .catch(err => console.warn('Neo4j evidence graph write failed:', err.message));
-
-        // Build application data for risk engine
-        const applicationData = {
-          phone: phoneNumber,
-          phoneHash,
-          consent: answers.consent,
-          location: answers.location,
-          farmAccess: answers.farmAccess,
-          leaseLength: answers.leaseLength || null,
-          cropType: answers.cropType,
-          herdSize: answers.herdSize || null,
-          milkCooperative: answers.milkCooperative || null,
-          farmSeason: answers.farmSeason || null,
-          communityTies: answers.communityTies,
-          loanHistory: answers.loanHistory || null, // may be null if skipped
-          inputAccess: answers.inputAccess,
-          questionsAnswered: sequence.length,
-          adaptiveBranches: {
-            wasDairy: answers.cropType === 'dairy',
-            hasGroupFinance: ['chama', 'sacco', 'coop'].includes(answers.communityTies),
-            wasLeased: answers.farmAccess === 'leased',
-            loanHistorySkipped: !sequence.includes('loanHistory'),
-          },
-          evidenceGraph: graphPayload,
-        };
-
-        // Run risk assessment (fetches M-Pesa, weather, Neo4j graph queries)
-        const result = await initiateRiskAssessment(applicationData, phoneHash);
-
-        // Persist farmer record
-        const existing = await getFarmerRecord(phoneNumber);
-        await saveFarmerRecord(phoneNumber, {
-          lastScore: result,
-          lastTier: result.tier,
-          lastScoredAt: result.scoredAt,
-          assessmentCount: (existing?.assessmentCount || 0) + 1,
-          pinSet: existing?.pinSet || false,
-          pin: existing?.pin || null,
-          lastEvidence: result.evidenceProfile || null,
-          lastSequence: sequence,
-          adaptiveBranches: applicationData.adaptiveBranches,
-        });
-
-        // Send SMS (non-blocking)
-        const smsText = buildSMS(result);
-        console.log('📱 SMS CONTENT:', smsText);
-        sendSMS(phoneNumber, smsText).catch(err =>
-          console.error('SMS send failed:', err.message)
-        );
-
-        await deleteSession(sessionId);
-        return S.processing();
-      }
+    if (lastPart === '2') {
+      await deleteSession(sessionId);
+      return S.main();
     }
+
+    if (lastPart === '0') {
+      await deleteSession(sessionId);
+      return S.goodbye();
+    }
+
+    return S.invalid();
   }
 
+  // ── Normal question flow ─────────────────────────────────────────────────
+  const nextKey = sequence[answeredKeys.length];
+
+  // Show first question
+  if (parts.length === 1 && answeredKeys.length === 0) {
+    return screenForKey(nextKey);
+  }
+
+  // Process incoming answer
+  const answerIndex = answeredKeys.length + 1;
+  if (parts.length <= answerIndex) {
+    return screenForKey(nextKey);
+  }
+
+  const rawValue = parts[answerIndex];
+  const mapped = mapAnswer(nextKey, rawValue);
+
+  if (mapped === undefined || (mapped === rawValue && !Object.keys(ANSWER_MAPS[nextKey] || {}).length)) {
+    return S.invalid();
+  }
+
+  const validValues = ANSWER_MAPS[nextKey] ? Object.values(ANSWER_MAPS[nextKey]) : null;
+  if (validValues && !validValues.includes(mapped)) {
+    return S.invalid();
+  }
+
+  answers[nextKey] = mapped;
+  await saveSession(sessionId, session);
+
+  // Recompute sequence after saving (answers may change branch)
+  const newSequence = computeSequence(answers);
+  const newAnsweredKeys = newSequence.filter(k => answers.hasOwnProperty(k));
+
+  // ── All questions answered → show confirm screen ────────────────────────
+  if (newAnsweredKeys.length === newSequence.length) {
+    return S.confirm(answers, newSequence);
+  }
+
+  // ── More questions remaining ─────────────────────────────────────────────
+  const nextNextKey = newSequence[newAnsweredKeys.length];
+  return screenForKey(nextNextKey);
+}
+
+ 
+
+ 
   // ══ FLOW B: View my result (PIN-gated) ═══════════════════════════════════
   if (mainChoice === '2') {
     const farmerRecord = await getFarmerRecord(phoneNumber);
