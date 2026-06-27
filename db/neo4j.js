@@ -1,38 +1,23 @@
 /**
- * neo4j.js — graph database connection and query helpers
+ * neo4j.js — graph database connection and query helpers (v2)
  *
- * What lives in Neo4j (not MongoDB):
- *   Nodes:    Farmer, Cooperative, Lender, ClimateZone
- *   Edges:    MEMBER_OF, BORROWED_FROM, VOUCHED_BY, LOCATED_IN
+ * Changes from v1:
+ *   - writeFarmerNode: removed gender field, added farmAccess
+ *   - writeEvidenceGraph: NEW — writes the full evidence graph
+ *     payload produced by ussdFlow.js buildEvidenceGraphPayload()
+ *   - getEvidenceProfile, getNetworkBonus, seedDemoCooperative: unchanged
  *
- * Why graph for these?
- *   A farmer with no personal loan history but who belongs to a
- *   cooperative where 94% of members repaid is NOT the same risk
- *   as a farmer who stands alone. That relationship signal is one
- *   Cypher query. In MongoDB it would require multiple lookups and
- *   manual aggregation.
- *
- *   Second-degree discovery: a farmer may have NO direct coop record
- *   but sell to an aggregator who buys from 40 reliable farmers. Neo4j
- *   traverses that path in one query. MongoDB cannot.
- *
- * Evidence profile structure:
- *   {
- *     found: boolean,           // did Neo4j find any relationships?
- *     coopRepayRate: number|null,
- *     coopSize: number|null,
- *     coopName: string|null,
- *     goodNeighbors: number,    // same-coop farmers with clean repayment
- *     guarantors: number,
- *     secondDegreeLinks: number, // farmers connected via shared aggregator/lender
- *     adjustment: number,        // net score adjustment (-40 to +120)
- *     signals: string[],         // human-readable list of what was found
- *   }
- *
- * getNetworkBonus() is kept for backward compatibility — it now wraps
- * getEvidenceProfile() and returns the same { bonus, reason } shape.
- *
- * Falls back gracefully to empty evidence if Neo4j is not configured.
+ * Node model (v2):
+ *   (:Farmer)         — phoneHash, location, farmAccess, crop, scoredAt
+ *   (:FarmTenure)     — type, leaseLength, evidenceRole
+ *   (:CropActivity)   — cropType, season, herdSize, milkCooperative, evidenceRole
+ *   (:CommunityGroup) — type, paymentFrequency, evidenceRole
+ *   (:LoanRecord)     — outcome, evidenceRole
+ *   (:InputPurchase)  — frequency, evidenceRole
+ *   (:MPesaConsent)   — granted, evidenceRole
+ *   (:Cooperative)    — name (pre-existing, for network evidence)
+ *   (:Lender)         — name (pre-existing)
+ *   (:ClimateZone)    — (pre-existing)
  */
 
 const neo4j = require('neo4j-driver');
@@ -52,13 +37,9 @@ function getDriver() {
   return driver;
 }
 
-/**
- * Run a Cypher query. Returns array of record objects.
- * Handles session lifecycle automatically.
- */
 async function query(cypher, params = {}) {
   const d = getDriver();
-  if (!d) return [];                    // Neo4j not configured — silent fallback
+  if (!d) return [];
 
   const session = d.session({ database: process.env.NEO4J_DATABASE });
   try {
@@ -72,7 +53,7 @@ async function query(cypher, params = {}) {
   }
 }
 
-// ── Schema setup — run once on first deploy ───────────────────────────────────
+// ── Schema setup ───────────────────────────────────────────────────────────────
 
 async function initSchema() {
   const d = getDriver();
@@ -93,28 +74,24 @@ async function initSchema() {
   console.log('✅ Neo4j schema ready');
 }
 
-// ── Farmer node write ─────────────────────────────────────────────────────────
+// ── Farmer node write ──────────────────────────────────────────────────────────
 
 /**
- * Upsert a Farmer node and attach relationships.
- * Called after scoring — phoneHash is used instead of raw phone number.
- *
- * @param {object} params
- *   phoneHash, tier, crop, land, coopName (optional), hadLoan, repaid, gender
+ * Upsert a Farmer node.
+ * gender removed — not collected or stored.
+ * farmAccess added — replaces land size as tenure signal.
  */
-async function writeFarmerNode({ phoneHash, tier, crop, land, coopName, hadLoan, repaid, gender }) {
-  // Upsert farmer node
+async function writeFarmerNode({ phoneHash, tier, crop, farmAccess, location, coopName, hadLoan, repaid }) {
   await query(
     `MERGE (f:Farmer {phoneHash: $phoneHash})
-     SET f.tier      = $tier,
-         f.crop      = $crop,
-         f.land      = $land,
-         f.gender    = $gender,
-         f.updatedAt = datetime()`,
-    { phoneHash, tier, crop, land, gender }
+     SET f.tier       = $tier,
+         f.crop       = $crop,
+         f.farmAccess = $farmAccess,
+         f.location   = $location,
+         f.updatedAt  = datetime()`,
+    { phoneHash, tier, crop, farmAccess, location }
   );
 
-  // Attach cooperative relationship
   if (coopName) {
     await query(
       `MERGE (c:Cooperative {name: $coopName})
@@ -126,7 +103,6 @@ async function writeFarmerNode({ phoneHash, tier, crop, land, coopName, hadLoan,
     );
   }
 
-  // Attach loan repayment relationship
   if (hadLoan) {
     await query(
       `MERGE (l:Lender {name: 'self_reported'})
@@ -139,22 +115,117 @@ async function writeFarmerNode({ phoneHash, tier, crop, land, coopName, hadLoan,
   }
 }
 
-// ── Evidence profile ──────────────────────────────────────────────────────────
+// ── Evidence graph write (NEW in v2) ───────────────────────────────────────────
 
 /**
- * Discover all relationship evidence for a farmer in the graph.
+ * Write the full evidence graph produced by ussdFlow.js buildEvidenceGraphPayload().
  *
- * This is the core Neo4j value: we look for evidence before assuming
- * a farmer has none. Three layers of discovery:
+ * The payload shape is:
+ * {
+ *   phoneHash: string,
+ *   nodes: [{ label: string, props: object }],
+ *   relationships: [{ from: string, to: string, type: string }]
+ * }
  *
- *   Layer 1 — Direct cooperative membership & repayment rate
- *   Layer 2 — Same-coop neighbors with clean repayment history
- *   Layer 3 — Second-degree links (shared aggregator / lender network)
- *             This is what MongoDB cannot easily do — we traverse two hops.
- *
- * Returns a structured evidence object. Never throws — falls back to
- * empty evidence so scoring always completes.
+ * Strategy:
+ *   - Each non-Farmer node is keyed by (phoneHash + label) to allow
+ *     upsert without collision across multiple assessments.
+ *   - Relationships are MERGE'd so re-running an assessment doesn't
+ *     create duplicate edges.
+ *   - CommunityGroup nodes of type 'chama'/'sacco'/'coop' are also
+ *     linked to the global Cooperative node if one exists, enabling
+ *     the existing getEvidenceProfile Layer 1/2/3 queries to work.
  */
+async function writeEvidenceGraph({ nodes, relationships, phoneHash }) {
+  if (!phoneHash) {
+    console.warn('writeEvidenceGraph called without phoneHash — skipping');
+    return;
+  }
+
+  // Ensure farmer node exists first
+  await query(
+    `MERGE (f:Farmer {phoneHash: $phoneHash})
+     SET f.updatedAt = datetime()`,
+    { phoneHash }
+  );
+
+  // Write each node (skip Farmer — already written above)
+  for (const node of nodes) {
+    if (node.label === 'Farmer') continue;
+
+    // Build SET clause from props — exclude undefined values
+    const cleanProps = Object.fromEntries(
+      Object.entries(node.props).filter(([, v]) => v !== undefined && v !== null)
+    );
+
+    if (Object.keys(cleanProps).length === 0) continue;
+
+    const setParts = Object.keys(cleanProps).map(k => `n.${k} = $${k}`).join(', ');
+
+    await query(
+      `MERGE (f:Farmer {phoneHash: $phoneHash})
+       MERGE (n:${node.label} {phoneHash: $phoneHash, nodeLabel: '${node.label}'})
+       SET ${setParts}`,
+      { phoneHash, ...cleanProps }
+    );
+
+    // Special case: CommunityGroup with type chama/sacco/coop
+    // Link it to a global Cooperative node so getEvidenceProfile queries can traverse it
+    if (node.label === 'CommunityGroup' && ['chama', 'sacco', 'coop'].includes(cleanProps.type)) {
+      const coopName = `${cleanProps.type}_${phoneHash.slice(0, 8)}`;
+      await query(
+        `MERGE (c:Cooperative {name: $coopName})
+         SET c.type = $type, c.updatedAt = datetime()
+         WITH c
+         MATCH (f:Farmer {phoneHash: $phoneHash})
+         MERGE (f)-[:MEMBER_OF]->(c)`,
+        { coopName, type: cleanProps.type, phoneHash }
+      );
+    }
+
+    // Special case: LoanRecord — also write to BORROWED_FROM for getEvidenceProfile
+    if (node.label === 'LoanRecord' && cleanProps.outcome) {
+      const repaid = cleanProps.outcome === 'repaid_full' || cleanProps.outcome === 'repaid_chama';
+      await query(
+        `MERGE (l:Lender {name: 'self_reported'})
+         WITH l
+         MATCH (f:Farmer {phoneHash: $phoneHash})
+         MERGE (f)-[r:BORROWED_FROM]->(l)
+         SET r.repaid = $repaid, r.outcome = $outcome, r.recordedAt = datetime()`,
+        { phoneHash, repaid, outcome: cleanProps.outcome }
+      );
+    }
+  }
+
+  // Write relationships between evidence nodes
+  for (const rel of relationships) {
+    if (rel.from === 'Farmer' && rel.to !== 'Farmer') {
+      // Farmer → evidence node
+      await query(
+        `MATCH (f:Farmer {phoneHash: $phoneHash})
+         MATCH (n {phoneHash: $phoneHash, nodeLabel: $toLabel})
+         MERGE (f)-[:${rel.type}]->(n)`,
+        { phoneHash, toLabel: rel.to }
+      ).catch(err => {
+        // Non-fatal: relationship may fail if node wasn't written (null props)
+        console.warn(`writeEvidenceGraph rel ${rel.type} skipped:`, err.message);
+      });
+    } else if (rel.from === 'CommunityGroup' && rel.to === 'CropActivity') {
+      // CommunityGroup → CropActivity (milk cooperative payment record)
+      await query(
+        `MATCH (g {phoneHash: $phoneHash, nodeLabel: 'CommunityGroup'})
+         MATCH (c {phoneHash: $phoneHash, nodeLabel: 'CropActivity'})
+         MERGE (g)-[:${rel.type}]->(c)`,
+        { phoneHash }
+      ).catch(err => {
+        console.warn(`writeEvidenceGraph coop→crop rel skipped:`, err.message);
+      });
+    }
+  }
+}
+
+// ── Evidence profile (unchanged from v1) ──────────────────────────────────────
+
 async function getEvidenceProfile(phoneHash) {
   const evidence = {
     found:             false,
@@ -168,7 +239,7 @@ async function getEvidenceProfile(phoneHash) {
     signals:           [],
   };
 
-  // ── Layer 1: Cooperative repayment rate ──────────────────────────────────
+  // Layer 1: Cooperative repayment rate
   const coopRows = await query(
     `MATCH (f:Farmer {phoneHash: $phoneHash})-[:MEMBER_OF]->(c:Cooperative)
      OPTIONAL MATCH (c)<-[:MEMBER_OF]-(member:Farmer)-[loan:BORROWED_FROM]->()
@@ -204,14 +275,13 @@ async function getEvidenceProfile(phoneHash) {
         `Cooperative repayment concern: ${rate}% rate at ${evidence.coopName}`
       );
     } else if (total >= 5) {
-      // Moderate rate — still evidence, no score change
       evidence.signals.push(
         `Member of ${evidence.coopName} — ${rate}% repayment rate (${total} members)`
       );
     }
   }
 
-  // ── Layer 2: Same-coop neighbors with clean repayment ────────────────────
+  // Layer 2: Same-coop neighbors with clean repayment
   const neighborRows = await query(
     `MATCH (f:Farmer {phoneHash: $phoneHash})-[:MEMBER_OF]->(c:Cooperative)
      MATCH (neighbor:Farmer)-[:MEMBER_OF]->(c)
@@ -228,24 +298,14 @@ async function getEvidenceProfile(phoneHash) {
       : (neighborRows[0].goodNeighbors || 0);
 
     evidence.goodNeighbors = neighbors;
-
     if (neighbors >= 2) {
       evidence.found = true;
       evidence.adjustment += 40;
-      evidence.signals.push(
-        `${neighbors} cooperative neighbors with verified clean repayment`
-      );
+      evidence.signals.push(`${neighbors} cooperative neighbors with verified clean repayment`);
     }
   }
 
-  // ── Layer 3: Second-degree links via shared aggregator/lender ────────────
-  // This is the key Neo4j differentiator: two-hop traversal.
-  // Farmer → MEMBER_OF → Cooperative ← MEMBER_OF ← OtherFarmer → BORROWED_FROM → Lender
-  // We find farmers who share a lender with this farmer's cooperative members,
-  // and count how many of those second-degree connections have repaid.
-  //
-  // For thin-file farmers with NO direct coop record, this can still find
-  // evidence through a shared aggregator or micro-lender network.
+  // Layer 3: Second-degree links
   const secondDegreeRows = await query(
     `MATCH (f:Farmer {phoneHash: $phoneHash})
      OPTIONAL MATCH (f)-[:MEMBER_OF]->(c:Cooperative)<-[:MEMBER_OF]-(neighbor:Farmer)
@@ -267,18 +327,14 @@ async function getEvidenceProfile(phoneHash) {
       : (secondDegreeRows[0].secondDegree || 0);
 
     evidence.secondDegreeLinks = sd;
-
     if (sd >= 3) {
       evidence.found = true;
-      // Second-degree gives a smaller boost — it's weaker signal
       evidence.adjustment += 15;
-      evidence.signals.push(
-        `${sd} second-degree connections with clean repayment history in shared network`
-      );
+      evidence.signals.push(`${sd} second-degree connections with clean repayment in shared network`);
     }
   }
 
-  // ── Peer guarantor ────────────────────────────────────────────────────────
+  // Peer guarantors
   const guarantorRows = await query(
     `MATCH (g:Farmer)-[:VOUCHED_BY]->(f:Farmer {phoneHash: $phoneHash})
      MATCH (g)-[loan:BORROWED_FROM]->()
@@ -293,28 +349,19 @@ async function getEvidenceProfile(phoneHash) {
       : (guarantorRows[0].guarantors || 0);
 
     evidence.guarantors = guarantors;
-
     if (guarantors >= 1) {
       evidence.found = true;
       evidence.adjustment += 30;
-      evidence.signals.push(
-        `${guarantors} active peer guarantor(s) with verified repayment history`
-      );
+      evidence.signals.push(`${guarantors} active peer guarantor(s) with verified repayment history`);
     }
   }
 
-  // Clamp adjustment
   evidence.adjustment = Math.max(-40, Math.min(120, evidence.adjustment));
-
   return evidence;
 }
 
-// ── Network bonus (backward-compatible wrapper) ───────────────────────────────
+// ── Network bonus (backward-compatible wrapper) ────────────────────────────────
 
-/**
- * Kept for backward compatibility. Wraps getEvidenceProfile() and returns
- * the original { bonus, reason } shape so existing callers don't break.
- */
 async function getNetworkBonus(phoneHash) {
   try {
     const evidence = await getEvidenceProfile(phoneHash);
@@ -328,18 +375,17 @@ async function getNetworkBonus(phoneHash) {
   }
 }
 
-// ── Seed demo cooperative data ────────────────────────────────────────────────
+// ── Seed demo data (unchanged) ─────────────────────────────────────────────────
 
 async function seedDemoCooperative() {
   const d = getDriver();
   if (!d) { console.log('Neo4j not configured — skip seed'); return; }
 
-  // Create Siaya Dairy Coop with 10 members, 9 repaid
   await query(`MERGE (c:Cooperative {name: 'Siaya Dairy Coop'}) SET c.region = 'Siaya'`);
 
   for (let i = 1; i <= 10; i++) {
     const hash   = `demo_member_${i}`;
-    const repaid = i <= 9; // 90% repayment rate
+    const repaid = i <= 9;
     await query(
       `MERGE (f:Farmer {phoneHash: $hash})
        SET f.crop = 'dairy', f.tier = ${repaid ? 1 : 3}
@@ -352,7 +398,6 @@ async function seedDemoCooperative() {
     );
   }
 
-  // Seed a second lender network for second-degree discovery demo
   await query(`MERGE (l:Lender {name: 'kilimo_microfinance'}) SET l.region = 'Siaya'`);
   for (let i = 1; i <= 5; i++) {
     const hash = `kilimo_borrower_${i}`;
@@ -374,6 +419,7 @@ module.exports = {
   query,
   initSchema,
   writeFarmerNode,
+  writeEvidenceGraph,   // NEW
   getEvidenceProfile,
   getNetworkBonus,
   seedDemoCooperative,
