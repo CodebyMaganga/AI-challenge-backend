@@ -32,6 +32,7 @@ const {
 
 const chamas = require('../db/chamaRegistry');
 const Farmer = require('../db/farmerModel');
+const { rescoreFarmer } = require('../services/rescoreService');
 
 // ── Upload middleware setup (multer) ──────────────────────────────────────────
 let upload;
@@ -252,35 +253,43 @@ router.post('/farmers/:phoneHash/evidence', async (req, res) => {
 });
 
 // POST /dashboard/farmers/:phoneHash/simulate-mpesa
+// POST /dashboard/farmers/:phoneHash/simulate-mpesa
 router.post('/farmers/:phoneHash/simulate-mpesa', async (req, res) => {
   try {
-    const farmer = await getFarmerDetail(req.params.phoneHash);
+    const { phoneHash } = req.params;
+
+    // ❗ Use Farmer.findOne directly (NOT getFarmerDetail) to get a Mongoose document
+    const farmer = await Farmer.findOne({ phoneHash });
     if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
 
-    // Simulate parsing an M‑Pesa statement
-    const weeklyAmount = Math.floor(Math.random() * 800) + 200;
-    const monthlyAmount = Math.floor(Math.random() * 600) + 100;
-    const mpesaScore = Math.floor(Math.random() * 56) + 40; // 40–95
+    // Simulate cashflow data
+    const weeklyAmount = Math.floor(Math.random() * 800) + 200;    // 200–1000
+    const monthlyAmount = Math.floor(Math.random() * 600) + 100;   // 100–700
+    const mpesaScore = Math.floor(Math.random() * 56) + 40;        // 40–95
 
-    const latestAssessment = farmer.assessmentHistory?.[0];
-    if (!latestAssessment) return res.status(400).json({ error: 'No assessment to update' });
+    const latest = farmer.assessmentHistory?.[0];
+    if (!latest) return res.status(400).json({ error: 'No assessment to update' });
 
-    latestAssessment.evidence = {
-      ...latestAssessment.evidence,
+    // Update evidence with new cashflow
+    latest.evidence = {
+      ...latest.evidence,
       mpesaScore,
       mpesaWeekly: weeklyAmount,
       mpesaMonthly: monthlyAmount,
       mpesaStatementParsed: true,
     };
 
-    // Mark as uploaded (pretend)
+    // Mark the verification as uploaded
     if (!farmer.evidenceVerification) farmer.evidenceVerification = {};
     farmer.evidenceVerification.mpesaStatement = {
       uploaded: true,
-      filename: 'statement-simulated.pdf', // dummy name
+      filename: 'statement-simulated.pdf',
     };
 
+    // ✅ Now .save() works because farmer is a Mongoose document
     await farmer.save();
+
+    // Run the full re‑score
     const updatedFarmer = await rescoreFarmer(farmer);
 
     res.json({ success: true, farmer: updatedFarmer });
