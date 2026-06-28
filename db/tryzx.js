@@ -1,20 +1,4 @@
 // services/riskEngine.js
-/**
- * Risk assessment engine — ShambAI v2
- *
- * Field changes from v1 → v2 (driven by ussdFlow.js redesign):
- *   farmSize    → removed (replaced by farmAccess + leaseLength)
- *   cropSeason  → farmSeason (nullable — dairy farmers don't have seasons)
- *   pastLoan    → loanHistory (nullable — skipped when communityTies found)
- *   gender      → removed entirely (never used for scoring)
- *   NEW: communityTies, inputAccess, farmAccess, leaseLength,
- *        herdSize, milkCooperative, adaptiveBranches
- *
- * writeFarmerNode is NOT called here — ussdFlow.js calls it before
- * initiateRiskAssessment runs. Calling it twice caused a race condition
- * and a stale gender write.
- */
-
 const mpesaService      = require('./mpesaService');
 const weatherService    = require('./weatherService');
 const neo4jService      = require('./neo4jService');

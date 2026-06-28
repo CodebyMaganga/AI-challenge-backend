@@ -26,64 +26,69 @@ const Farmer = require('./farmerModel');
  * @param {object} result      — the return value of initiateRiskAssessment
  */
 async function saveFarmerAssessment(phoneHash, appData, result) {
+  console.log('───────────────────────────────────────');
+  console.log('💾 saveFarmerAssessment START');
+  console.log('   phoneHash:', phoneHash);
+  console.log('   result.tier:', result.tier);
+  console.log('   result.scoredAt:', result.scoredAt);
+  console.log('   result.evidenceProfile exists:', !!result.evidenceProfile);
+  console.log('   result.evidenceProfile.factors exists:', !!result.evidenceProfile?.factors);
+  console.log('   result.evidenceProfile.adjustedScore:', result.evidenceProfile?.adjustedScore);
+  console.log('   result.evidenceProfile.topReason:', result.evidenceProfile?.topReason);
+
   const {
-    location,
-    farmAccess,
-    leaseLength,
-    cropType,
-    herdSize,
-    milkCooperative,
-    farmSeason,
-    communityTies,
-    loanHistory,
-    inputAccess,
-    consent,
-    adaptiveBranches,
-    evidenceGraph,
+    location, farmAccess, leaseLength, cropType, herdSize,
+    milkCooperative, farmSeason, communityTies, loanHistory,
+    inputAccess, consent, adaptiveBranches,
   } = appData;
 
-  const { tier, gaps, ptsToNextTier, evidenceProfile, scoredAt } = result;
+  const { tier, gaps, ptsToNextTier, scoredAt } = result;
 
-  const ep = result.evidenceProfile || {};
-  const factors = result.evidenceProfile?.factors || {};
+  const ep      = result.evidenceProfile || {};
+  const factors = ep.factors || {};
+
+  console.log('💾 factors.adjustedScore:', factors.adjustedScore);
+  console.log('💾 factors.baseScore:', factors.baseScore);
+  console.log('💾 factors.topReason:', factors.topReason);
+  console.log('💾 ep.found:', ep.found);
 
   const assessmentSnapshot = {
     scoredAt:      new Date(scoredAt),
     tier,
-    baseScore:     factors.baseScore,
-    adjustedScore: factors.adjustedScore,
-    topReason:     factors.topReason,
+    baseScore:     factors.baseScore     ?? null,
+    adjustedScore: factors.adjustedScore ?? null,
+    topReason:     factors.topReason     ?? null,
     gaps,
     ptsToNextTier,
-
     answers: {
       farmAccess,
-      leaseLength:     leaseLength || null,
+      leaseLength:     leaseLength     || null,
       cropType,
-      herdSize:        herdSize || null,
+      herdSize:        herdSize        || null,
       milkCooperative: milkCooperative || null,
-      farmSeason:      farmSeason || null,
+      farmSeason:      farmSeason      || null,
       communityTies,
-      loanHistory:     loanHistory || null,
+      loanHistory:     loanHistory     || null,
       inputAccess,
       consentGiven:    !!consent,
     },
-
     evidence: {
-      mpesaScore:        factors.mpesa?.score ?? null,
-      weatherScore:      factors.weather?.score ?? null,
+      mpesaScore:        factors.mpesa?.score      ?? null,
+      weatherScore:      factors.weather?.score    ?? null,
       graphSocialScore:  factors.graph?.socialScore ?? null,
-      coopRepayRate:     ep.coopRepayRate ?? null,
-      goodNeighbors:     ep.goodNeighbors ?? 0,
-      secondDegreeLinks: ep.secondDegreeLinks ?? 0,
-      networkFound:      ep.found ?? false,
+      coopRepayRate:     ep.coopRepayRate           ?? null,
+      goodNeighbors:     ep.goodNeighbors           ?? 0,
+      secondDegreeLinks: ep.secondDegreeLinks       ?? 0,
+      networkFound:      ep.found                   ?? false,
     },
-
     adaptiveBranches: adaptiveBranches || {},
   };
 
+  console.log('💾 currentScore being saved:', factors.adjustedScore ?? null);
+  console.log('💾 currentTier being saved:', tier);
+
   try {
-    await Farmer.findOneAndUpdate(
+    const saved = await Farmer.findOneAndUpdate(
       { phoneHash },
       {
         $set: {
@@ -93,24 +98,28 @@ async function saveFarmerAssessment(phoneHash, appData, result) {
           farmAccess,
           communityTies,
           currentTier:      tier,
-          currentScore:      factors.adjustedScore ?? null,
-          currentTopReason:  factors.topReason ?? null,
-          lastScoredAt:      new Date(scoredAt),
+          currentScore:     factors.adjustedScore ?? null,
+          currentTopReason: factors.topReason     ?? null,
+          lastScoredAt:     new Date(scoredAt),
         },
         $inc:  { assessmentCount: 1 },
         $push: {
           assessmentHistory: {
             $each:     [assessmentSnapshot],
-            $slice:    -10,   // keep last 10 assessments only
-            $position: 0,     // newest first
+            $slice:    -10,
+            $position: 0,
           },
         },
       },
       { upsert: true, new: true }
     );
+    console.log('💾 ✅ Saved to farmers collection');
+    console.log('   saved.currentScore:', saved.currentScore);
+    console.log('   saved.currentTier:', saved.currentTier);
+    console.log('───────────────────────────────────────');
   } catch (err) {
-    // Non-fatal — USSD flow must complete even if dashboard write fails
-    console.error('farmerStore.saveFarmerAssessment failed:', err.message);
+    console.error('💾 ❌ farmerStore.saveFarmerAssessment failed:', err.message);
+    console.error(err);
   }
 }
 
