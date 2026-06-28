@@ -32,6 +32,8 @@ const {
 
 const chamas = require('../db/chamaRegistry');
 const Farmer = require('../db/farmerModel');
+const { rescoreFarmer } = require('../services/rescoreService');
+const { buildSMS } = require('../services/explainer'); 
 
 // ── Upload middleware setup (multer) ──────────────────────────────────────────
 let upload;
@@ -251,6 +253,53 @@ router.post('/farmers/:phoneHash/evidence', async (req, res) => {
   }
 });
 
+// POST /dashboard/farmers/:phoneHash/simulate-mpesa
+// POST /dashboard/farmers/:phoneHash/simulate-mpesa
+router.post('/farmers/:phoneHash/simulate-mpesa', async (req, res) => {
+  try {
+    const { phoneHash } = req.params;
+
+    // ❗ Use Farmer.findOne directly (NOT getFarmerDetail) to get a Mongoose document
+    const farmer = await Farmer.findOne({ phoneHash });
+    if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
+
+    // Simulate cashflow data
+    const weeklyAmount = Math.floor(Math.random() * 800) + 200;    // 200–1000
+    const monthlyAmount = Math.floor(Math.random() * 600) + 100;   // 100–700
+    const mpesaScore = Math.floor(Math.random() * 56) + 40;        // 40–95
+
+    const latest = farmer.assessmentHistory?.[0];
+    if (!latest) return res.status(400).json({ error: 'No assessment to update' });
+
+    // Update evidence with new cashflow
+    latest.evidence = {
+      ...latest.evidence,
+      mpesaScore,
+      mpesaWeekly: weeklyAmount,
+      mpesaMonthly: monthlyAmount,
+      mpesaStatementParsed: true,
+    };
+
+    // Mark the verification as uploaded
+    if (!farmer.evidenceVerification) farmer.evidenceVerification = {};
+    farmer.evidenceVerification.mpesaStatement = {
+      uploaded: true,
+      filename: 'statement-simulated.pdf',
+    };
+
+    // ✅ Now .save() works because farmer is a Mongoose document
+    await farmer.save();
+
+    // Run the full re‑score
+    const updatedFarmer = await rescoreFarmer(farmer);
+
+    res.json({ success: true, farmer: updatedFarmer });
+  } catch (err) {
+    console.error('Simulate M-Pesa error:', err);
+    res.status(500).json({ error: err.message || 'Simulation failed' });
+  }
+});
+
 // POST /dashboard/upload
 router.post('/upload', (req, res) => {
   if (!upload) {
@@ -269,6 +318,34 @@ router.post('/upload', (req, res) => {
       url:      `/uploads/${req.file.filename}`,
     });
   });
+});
+
+
+router.get('/farmers/:phoneHash/sms-preview', async (req, res) => {
+  try {
+    const farmer = await getFarmerDetail(req.params.phoneHash);
+    if (!farmer) return res.status(404).json({ error: 'Farmer not found' });
+
+    const latest = farmer.assessmentHistory?.[0];
+    if (!latest) return res.status(400).json({ error: 'No assessment to build SMS from' });
+
+    // Build the score result object as expected by buildSMS
+    const scoreResult = {
+      tier: latest.tier,
+      gaps: latest.gaps?.map(gap => ({ gap })) || [],   // convert strings back to { gap }
+      ptsToNextTier: latest.ptsToNextTier,
+      evidenceProfile: {
+        found: latest.evidence?.networkFound || false,
+        // You can add more fields if needed (coopName, etc.)
+      },
+    };
+
+    const smsText = buildSMS(scoreResult);
+    res.json({ sms: smsText });
+  } catch (err) {
+    console.error('SMS preview error:', err);
+    res.status(500).json({ error: 'Failed to generate SMS' });
+  }
 });
 
 module.exports = router;
